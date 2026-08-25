@@ -31,7 +31,7 @@ if [[ ! -f "${node_archive}" ]]; then
   exit 1
 fi
 
-for required_path in .next bin node_modules public package.json next.config.ts LICENSE; do
+for required_path in .next .playwright-browsers bin node_modules public package.json next.config.ts LICENSE; do
   if [[ ! -e "${package_root}/${required_path}" ]]; then
     echo "缺少打包所需文件: ${package_root}/${required_path}" >&2
     exit 1
@@ -63,6 +63,8 @@ cp -a "${package_root}/.next" "${app_root}/.next"
 cp -a "${package_root}/bin" "${app_root}/bin"
 cp -a "${package_root}/node_modules" "${app_root}/node_modules"
 cp -a "${package_root}/public" "${app_root}/public"
+# Chromium 必须位于产物内部，目标机器首次执行 playwright-cli 时不能依赖网络下载。
+cp -a "${package_root}/.playwright-browsers" "${bundle_root}/browsers"
 cp "${package_root}/package.json" "${app_root}/package.json"
 cp "${package_root}/next.config.ts" "${app_root}/next.config.ts"
 cp "${package_root}/LICENSE" "${bundle_root}/LICENSE"
@@ -81,6 +83,15 @@ set -eu
 # 从脚本所在目录启动，确保离线包移动或改名后仍能正确解析相对路径。
 bundle_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "${bundle_root}"
+
+# Skill 直接执行 playwright-cli 时，必须优先使用产物内的 Node.js 和 npm 可执行文件。
+PATH="${bundle_root}/runtime/bin:${bundle_root}/app/node_modules/.bin${PATH:+:${PATH}}"
+# 浏览器路径随离线包位置动态解析，解压目录改变后仍可找到完整 Chromium。
+PLAYWRIGHT_BROWSERS_PATH="${bundle_root}/browsers"
+# 离线环境禁止 CLI 每日访问 npm registry 检查更新，避免首个命令额外等待网络超时。
+NO_UPDATE_NOTIFIER=1
+export PATH PLAYWRIGHT_BROWSERS_PATH NO_UPDATE_NOTIFIER
+
 exec ./runtime/bin/node ./app/bin/pi-web.js --no-open "$@"
 EOF
 chmod 755 "${bundle_root}/start.sh"
