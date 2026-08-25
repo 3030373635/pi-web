@@ -31,7 +31,7 @@ if [[ ! -f "${node_archive}" ]]; then
   exit 1
 fi
 
-for required_path in .next .playwright-browsers bin node_modules public package.json next.config.ts LICENSE; do
+for required_path in .next .playwright-browsers bin node_modules public scripts/playwright-cli-wrapper.sh package.json next.config.ts LICENSE; do
   if [[ ! -e "${package_root}/${required_path}" ]]; then
     echo "缺少打包所需文件: ${package_root}/${required_path}" >&2
     exit 1
@@ -75,6 +75,10 @@ if [[ ! -x "${runtime_root}/bin/node" ]]; then
   echo "Node.js 压缩包中缺少可执行文件 runtime/bin/node" >&2
   exit 1
 fi
+
+# runtime/bin 在 PATH 中优先于 node_modules/.bin，使包装器只为 Playwright/Chromium 注入兼容库。
+cp "${package_root}/scripts/playwright-cli-wrapper.sh" "${runtime_root}/bin/playwright-cli"
+chmod 755 "${runtime_root}/bin/playwright-cli"
 
 cat > "${bundle_root}/start.sh" <<'EOF'
 #!/usr/bin/env sh
