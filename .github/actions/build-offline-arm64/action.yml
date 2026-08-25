@@ -1,0 +1,128 @@
+name: Build ARM64 offline package
+description: Build, verify, and upload one Pi Web ARM64 offline package.
+
+inputs:
+  package-platform:
+    description: Platform name used in the Pi Web artifact.
+    required: true
+  node-platform:
+    description: Platform name used by the official Node.js archive.
+    required: true
+  node-version:
+    description: Node.js version bundled into the offline package.
+    required: false
+    default: 22.19.0
+
+runs:
+  using: composite
+  steps:
+    - name: Validate target platform
+      shell: bash
+      run: |
+        set -euo pipefail
+        target_pair="${{ inputs.package-platform }}:${{ inputs.node-platform }}"
+        case "${target_pair}" in
+          linux:linux|macos:darwin) ;;
+          *)
+            echo "Unsupported target platform pair: ${target_pair}" >&2
+            exit 2
+            ;;
+        esac
+
+    - name: Set up build Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Verify ARM64 runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        test "$(node -p 'process.arch')" = "arm64"
+        test "$(node -p 'process.platform')" = "${{ inputs.node-platform }}"
+
+    - name: Install dependencies
+      shell: bash
+      run: npm ci
+
+    - name: Run tests
+      shell: bash
+      run: npm test
+
+    - name: Build production application
+      shell: bash
+      run: npm run build
+
+    - name: Keep production dependencies only
+      shell: bash
+      run: npm prune --omit=dev
+
+    - name: Download portable Node.js runtime
+      shell: bash
+      run: |
+        set -euo pipefail
+        node_archive="node-v${{ inputs.node-version }}-${{ inputs.node-platform }}-arm64.tar.xz"
+        node_base_url="https://nodejs.org/dist/v${{ inputs.node-version }}"
+        curl --fail --silent --show-error --location --remote-name "${node_base_url}/${node_archive}"
+        curl --fail --silent --show-error --location --remote-name "${node_base_url}/SHASUMS256.txt"
+        grep "  ${node_archive}$" SHASUMS256.txt | shasum -a 256 --check
+
+    - name: Assemble offline package
+      id: package
+      shell: bash
+      run: |
+        set -euo pipefail
+        package_version=$(node -p "require('./package.json').version")
+        artifact_name="pi-web-${package_version}-${{ inputs.package-platform }}-arm64"
+        ./scripts/package-offline-arm64.sh \
+          "${{ inputs.package-platform }}" \
+          "node-v${{ inputs.node-version }}-${{ inputs.node-platform }}-arm64.tar.xz" \
+          dist
+
+        # 校验文件使用产物内的相对文件名，下载并解压 Actions Artifact 后可直接执行校验。
+        (
+          cd dist
+          shasum -a 256 "${artifact_name}.tar.gz" > SHA256SUMS
+          shasum -a 256 --check SHA256SUMS
+        )
+        echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
+
+    - name: Smoke test packaged application
+      shell: bash
+      run: |
+        set -euo pipefail
+        smoke_root="${RUNNER_TEMP}/pi-web-offline-smoke"
+        mkdir -p "${smoke_root}"
+        tar -xzf "dist/${{ steps.package.outputs.artifact_name }}.tar.gz" -C "${smoke_root}"
+        bundle_root="${smoke_root}/${{ steps.package.outputs.artifact_name }}"
+
+        # 确认交付包使用目标平台的 ARM64 Node，而不是意外引用 runner 上的 Node。
+        test "$("${bundle_root}/runtime/bin/node" -p 'process.arch')" = "arm64"
+        test "$("${bundle_root}/runtime/bin/node" -p 'process.platform')" = "${{ inputs.node-platform }}"
+
+        "${bundle_root}/start.sh" --port 30141 > "${smoke_root}/server.log" 2>&1 &
+        server_pid=$!
+        trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
+
+        for attempt in $(seq 1 30); do
+          if curl --fail --silent --show-error http://127.0.0.1:30141/api/home > /dev/null; then
+            curl --fail --silent --show-error http://127.0.0.1:30141/ > /dev/null
+            exit 0
+          fi
+          sleep 1
+        done
+
+        cat "${smoke_root}/server.log"
+        exit 1
+
+    - name: Upload offline package
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ steps.package.outputs.artifact_name }}
+        path: |
+          dist/${{ steps.package.outputs.artifact_name }}.tar.gz
+          dist/SHA256SUMS
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 30

@@ -1,0 +1,23 @@
+name: Build Linux ARM64 offline package
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline-package:
+    name: Build Linux ARM64 offline package
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 30
+    steps:
+      # 必须先检出仓库，后续步骤才能加载仓库内的 composite action。
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build offline package
+        uses: ./.github/actions/build-offline-arm64
+        with:
+          package-platform: linux
+          node-platform: linux
