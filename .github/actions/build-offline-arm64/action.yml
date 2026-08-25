@@ -58,6 +58,14 @@ runs:
       shell: bash
       run: npm prune --omit=dev
 
+    - name: Install complete Playwright Chromium
+      shell: bash
+      run: |
+        set -euo pipefail
+        ./scripts/install-playwright-browser.sh \
+          "${{ inputs.package-platform }}" \
+          .playwright-browsers
+
     - name: Download portable Node.js runtime
       shell: bash
       run: |
@@ -100,6 +108,18 @@ runs:
         # 确认交付包使用目标平台的 ARM64 Node，而不是意外引用 runner 上的 Node。
         test "$("${bundle_root}/runtime/bin/node" -p 'process.arch')" = "arm64"
         test "$("${bundle_root}/runtime/bin/node" -p 'process.platform')" = "${{ inputs.node-platform }}"
+
+        # Skill 必须能通过产物内的 Node.js 启动 CLI，并从离线目录实际拉起 Chromium。
+        PATH="${bundle_root}/runtime/bin:${bundle_root}/app/node_modules/.bin:${PATH}"
+        PLAYWRIGHT_BROWSERS_PATH="${bundle_root}/browsers"
+        export PATH PLAYWRIGHT_BROWSERS_PATH
+        test "$(command -v playwright-cli)" = "${bundle_root}/app/node_modules/.bin/playwright-cli"
+        test -n "$(find "${bundle_root}/browsers" -maxdepth 1 -type d -name 'chromium-*' -print -quit)"
+        test -n "$(find "${bundle_root}/browsers" -maxdepth 1 -type d -name 'chromium_headless_shell-*' -print -quit)"
+        playwright-cli --help > /dev/null
+        playwright-cli -s=offline-smoke open about:blank > /dev/null
+        playwright-cli -s=offline-smoke snapshot > /dev/null
+        playwright-cli -s=offline-smoke close > /dev/null
 
         "${bundle_root}/start.sh" --port 30141 > "${smoke_root}/server.log" 2>&1 &
         server_pid=$!
