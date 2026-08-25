@@ -1,20 +1,30 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# 参数 1：Node.js 官方 Linux ARM64 .tar.xz 压缩包路径。
-# 参数 2：生成离线包的输出目录。
+# 参数 1：目标平台，只允许 linux 或 macos。
+# 参数 2：Node.js 官方 ARM64 .tar.xz 压缩包路径。
+# 参数 3：生成离线包的输出目录。
 # 环境变量 PI_WEB_PACKAGE_ROOT：可选，待打包的 Pi Web 根目录，默认是仓库根目录。
 # 环境变量 PI_WEB_BUILD_NODE：可选，构建环境的 Node.js 路径，默认从 PATH 查找 node。
-if [[ $# -ne 2 ]]; then
-  echo "用法: $0 <node-linux-arm64.tar.xz> <输出目录>" >&2
+if [[ $# -ne 3 ]]; then
+  echo "用法: $0 <linux|macos> <node-arm64.tar.xz> <输出目录>" >&2
   exit 2
 fi
 
-node_archive=$1
-output_root=$2
+platform=$1
+node_archive=$2
+output_root=$3
 script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 package_root=${PI_WEB_PACKAGE_ROOT:-$(cd "${script_root}/.." && pwd)}
 build_node=${PI_WEB_BUILD_NODE:-node}
+
+case "${platform}" in
+  linux|macos) ;;
+  *)
+    echo "不支持的目标平台: ${platform}" >&2
+    exit 2
+    ;;
+esac
 
 if [[ ! -f "${node_archive}" ]]; then
   echo "Node.js 压缩包不存在: ${node_archive}" >&2
@@ -38,7 +48,7 @@ if [[ -z "${package_version}" ]]; then
   exit 1
 fi
 
-bundle_name="pi-web-${package_version}-linux-arm64"
+bundle_name="pi-web-${package_version}-${platform}-arm64"
 mkdir -p "${output_root}"
 work_root=$(mktemp -d)
 trap 'rm -rf "${work_root}"' EXIT
