@@ -11,6 +11,10 @@ if [ ! -x "${real_cli}" ]; then
   exit 127
 fi
 
+# Playwright CLI 默认选择系统 Chrome；离线包未显式指定时必须改用随包分发的 Chromium。
+PLAYWRIGHT_MCP_BROWSER=${PLAYWRIGHT_MCP_BROWSER:-chromium}
+export PLAYWRIGHT_MCP_BROWSER
+
 # 非 Linux ARM64 平台没有麒麟 Mali GBM 冲突，直接保留原始启动行为。
 system_name=$(uname -s)
 machine_name=$(uname -m)
