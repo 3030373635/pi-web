@@ -60,6 +60,8 @@ mkdir -p "${app_root}" "${runtime_root}"
 
 # 生产构建仍依赖外置的 Pi SDK 和 Next.js 包，因此 node_modules 必须随离线包分发。
 cp -a "${package_root}/.next" "${app_root}/.next"
+# Next.js 构建缓存只用于增量构建，目标机器运行时不需要，禁止写入离线包。
+rm -rf "${app_root}/.next/cache"
 cp -a "${package_root}/bin" "${app_root}/bin"
 cp -a "${package_root}/node_modules" "${app_root}/node_modules"
 cp -a "${package_root}/public" "${app_root}/public"
