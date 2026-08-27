@@ -12,6 +12,22 @@ inputs:
     description: Node.js version bundled into the offline package.
     required: false
     default: 22.19.0
+  python-version:
+    description: CPython version bundled into the Linux offline package.
+    required: false
+    default: 3.12.14
+  python-build-tag:
+    description: python-build-standalone release tag used for Linux ARM64.
+    required: false
+    default: "20260825"
+  python-sha256:
+    description: SHA256 for the pinned Linux ARM64 Python archive.
+    required: false
+    default: 4c250ec7cea2aedde2b2e8925d7aaf5ba4924895469d6b5c81c7bdc453341c65
+  python-metadata-sha256:
+    description: SHA256 for the pinned Python full archive used to collect component licenses.
+    required: false
+    default: bce416de6ed29722e88adbcf2b7fcf387b6badf0d4d734019020c0ac8dee0648
 
 runs:
   using: composite
@@ -76,6 +92,34 @@ runs:
         curl --fail --silent --show-error --location --remote-name "${node_base_url}/SHASUMS256.txt"
         grep "  ${node_archive}$" SHASUMS256.txt | shasum -a 256 --check
 
+    - name: Install portable Python document runtime
+      if: inputs.package-platform == 'linux'
+      shell: bash
+      run: |
+        set -euo pipefail
+        # 补齐 full 归档解压和 ELF 审计命令，避免 runner 镜像差异绕过许可证或兼容性检查。
+        required_packages=()
+        command -v zstd > /dev/null || required_packages+=(zstd)
+        command -v file > /dev/null || required_packages+=(file)
+        command -v readelf > /dev/null || required_packages+=(binutils)
+        if [[ ${#required_packages[@]} -gt 0 ]]; then
+          sudo apt-get update
+          sudo apt-get install --yes "${required_packages[@]}"
+        fi
+        python_archive="cpython-${{ inputs.python-version }}+${{ inputs.python-build-tag }}-aarch64-unknown-linux-gnu-install_only_stripped.tar.gz"
+        metadata_archive="cpython-${{ inputs.python-version }}+${{ inputs.python-build-tag }}-aarch64-unknown-linux-gnu-pgo+lto-full.tar.zst"
+        python_url="https://github.com/astral-sh/python-build-standalone/releases/download/${{ inputs.python-build-tag }}/${python_archive}"
+        metadata_url="https://github.com/astral-sh/python-build-standalone/releases/download/${{ inputs.python-build-tag }}/${metadata_archive}"
+        curl --fail --silent --show-error --location --output "${python_archive}" "${python_url}"
+        curl --fail --silent --show-error --location --output "${metadata_archive}" "${metadata_url}"
+        echo "${{ inputs.python-sha256 }}  ${python_archive}" | shasum -a 256 --check
+        echo "${{ inputs.python-metadata-sha256 }}  ${metadata_archive}" | shasum -a 256 --check
+        ./scripts/install-python-runtime.sh \
+          "${python_archive}" \
+          "${metadata_archive}" \
+          scripts/python/requirements-linux-arm64.lock \
+          .python-runtime
+
     - name: Assemble offline package
       id: package
       shell: bash
@@ -108,6 +152,29 @@ runs:
         # 确认交付包使用目标平台的 ARM64 Node，而不是意外引用 runner 上的 Node。
         test "$("${bundle_root}/runtime/bin/node" -p 'process.arch')" = "arm64"
         test "$("${bundle_root}/runtime/bin/node" -p 'process.platform')" = "${{ inputs.node-platform }}"
+
+        if [[ "${{ inputs.package-platform }}" == "linux" ]]; then
+          # Python 命令必须来自产物内的相对软链接，并实际运行 ARM64 文档处理依赖。
+          test "$(readlink "${bundle_root}/runtime/bin/python")" = "../python/bin/python3"
+          test "$(readlink "${bundle_root}/runtime/bin/python3")" = "../python/bin/python3"
+          test "$("${bundle_root}/runtime/bin/python" -c 'import platform; print(platform.machine())')" = "aarch64"
+          test "$("${bundle_root}/runtime/bin/python" -c 'import platform; print(platform.python_version())')" = "${{ inputs.python-version }}"
+          test -f "${bundle_root}/runtime/python/licenses/Python-LICENSE.txt"
+          test -f "${bundle_root}/runtime/python/licenses/runtime-components/PYTHON.json"
+          test -f "${bundle_root}/runtime/python/licenses/runtime-components/licenses/LICENSE.openssl-3.txt"
+          test -f "${bundle_root}/runtime/python/licenses/python-packages.json"
+          # 扫描最终产物内所有 ELF 和原生扩展，禁止任何 GLIBC 符号超过麒麟目标机的 2.31。
+          ./scripts/audit-python-glibc.sh "${bundle_root}/runtime/python" 2.31
+          "${bundle_root}/runtime/bin/python" -c \
+            'import json, sys; data=json.load(open(sys.argv[1], encoding="utf-8")); names={item["metadata"]["name"].lower() for item in data["installed"]}; expected={"python-pptx", "openpyxl", "xlsxwriter", "python-docx", "docxtpl", "pypdf", "pdfplumber", "reportlab", "pypdfium2", "pillow", "numpy", "pandas", "defusedxml"}; assert expected <= names' \
+            "${bundle_root}/runtime/python/licenses/python-packages.json"
+          "${bundle_root}/runtime/bin/python" \
+            scripts/python-runtime-smoke.py \
+            "${smoke_root}/python-smoke"
+        else
+          test ! -e "${bundle_root}/runtime/python"
+          test ! -e "${bundle_root}/runtime/bin/python"
+        fi
 
         # Skill 必须能通过产物内的 Node.js 启动 CLI，并从离线目录实际拉起 Chromium。
         PATH="${bundle_root}/runtime/bin:${bundle_root}/app/node_modules/.bin:${PATH}"
