@@ -1,0 +1,18 @@
+# PowerPoint、Excel、Word 和 PDF 文档处理能力。
+python-pptx
+openpyxl
+xlsxwriter
+python-docx
+docxtpl
+pypdf
+pdfplumber
+reportlab
+pypdfium2
+
+# 图片、数值和表格数据处理能力。
+pillow
+numpy
+pandas
+
+# 防止 Office Open XML 解析遭受实体扩展攻击。
+defusedxml

@@ -6,6 +6,7 @@ set -euo pipefail
 # 参数 3：生成离线包的输出目录。
 # 环境变量 PI_WEB_PACKAGE_ROOT：可选，待打包的 Pi Web 根目录，默认是仓库根目录。
 # 环境变量 PI_WEB_BUILD_NODE：可选，构建环境的 Node.js 路径，默认从 PATH 查找 node。
+# 环境变量 PI_WEB_PYTHON_RUNTIME_ROOT：可选，Linux ARM64 Python 运行时目录。
 if [[ $# -ne 3 ]]; then
   echo "用法: $0 <linux|macos> <node-arm64.tar.xz> <输出目录>" >&2
   exit 2
@@ -17,6 +18,7 @@ output_root=$3
 script_root=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 package_root=${PI_WEB_PACKAGE_ROOT:-$(cd "${script_root}/.." && pwd)}
 build_node=${PI_WEB_BUILD_NODE:-node}
+python_runtime_root=${PI_WEB_PYTHON_RUNTIME_ROOT:-${package_root}/.python-runtime}
 
 case "${platform}" in
   linux|macos) ;;
@@ -28,6 +30,11 @@ esac
 
 if [[ ! -f "${node_archive}" ]]; then
   echo "Node.js 压缩包不存在: ${node_archive}" >&2
+  exit 1
+fi
+
+if [[ "${platform}" == "linux" && ! -x "${python_runtime_root}/bin/python3" ]]; then
+  echo "缺少 Linux ARM64 Python 运行时: ${python_runtime_root}/bin/python3" >&2
   exit 1
 fi
 
@@ -78,7 +85,14 @@ if [[ ! -x "${runtime_root}/bin/node" ]]; then
   exit 1
 fi
 
-# runtime/bin 在 PATH 中优先于 node_modules/.bin，使包装器只为 Playwright/Chromium 注入兼容库。
+# Python 只进入 Linux ARM64 产物；相对软链接保证离线包移动后命令仍然有效。
+if [[ "${platform}" == "linux" ]]; then
+  cp -a "${python_runtime_root}" "${runtime_root}/python"
+  ln -s ../python/bin/python3 "${runtime_root}/bin/python"
+  ln -s ../python/bin/python3 "${runtime_root}/bin/python3"
+fi
+
+# runtime/bin 在 PATH 中优先于 node_modules/.bin，统一暴露内置 Node.js、Python 和 Playwright 包装器。
 cp "${package_root}/scripts/playwright-cli-wrapper.sh" "${runtime_root}/bin/playwright-cli"
 chmod 755 "${runtime_root}/bin/playwright-cli"
 
@@ -90,7 +104,7 @@ set -eu
 bundle_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "${bundle_root}"
 
-# Skill 直接执行 playwright-cli 时，必须优先使用产物内的 Node.js 和 npm 可执行文件。
+# Agent 必须优先使用产物内的 Node.js、Python 和 npm 可执行文件。
 PATH="${bundle_root}/runtime/bin:${bundle_root}/app/node_modules/.bin${PATH:+:${PATH}}"
 # 浏览器路径随离线包位置动态解析，解压目录改变后仍可找到完整 Chromium。
 PLAYWRIGHT_BROWSERS_PATH="${bundle_root}/browsers"
