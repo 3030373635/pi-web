@@ -1,0 +1,236 @@
+name: Build Windows x64 offline package (Windows 10 target)
+description: Build, verify, and upload one Pi Web Windows x64 offline package targeting Windows 10.
+
+inputs:
+  node-version:
+    description: Node.js version bundled into the Windows offline package.
+    required: false
+    default: 22.19.0
+
+runs:
+  using: composite
+  steps:
+    - name: Set up build Node.js
+      uses: actions/setup-node@v5
+      with:
+        node-version: ${{ inputs.node-version }}
+        cache: npm
+
+    - name: Verify x64 Windows runner
+      shell: pwsh
+      run: |
+        if ((node -p "process.arch") -ne "x64") {
+          throw "The offline package must be built on an x64 runner."
+        }
+        if ((node -p "process.platform") -ne "win32") {
+          throw "The offline package must be built on Windows."
+        }
+
+    - name: Install dependencies
+      shell: pwsh
+      run: npm ci
+
+    - name: Run tests
+      shell: pwsh
+      run: npm test
+
+    - name: Build production application
+      shell: pwsh
+      run: npm run build
+
+    - name: Keep production dependencies only
+      shell: pwsh
+      run: npm prune --omit=dev
+
+    - name: Install complete Playwright Chromium
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $browserRoot = Join-Path $env:GITHUB_WORKSPACE ".playwright-browsers"
+        $env:PLAYWRIGHT_BROWSERS_PATH = $browserRoot
+        & ".\node_modules\.bin\playwright-cli.cmd" install-browser chromium
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to install Playwright Chromium."
+        }
+
+        # 同时保留完整浏览器和无头 shell，离线环境不能在首次使用时补下载。
+        if (-not (Get-ChildItem $browserRoot -Directory -Filter "chromium-*")) {
+          throw "The browser download is missing full Chromium."
+        }
+        if (-not (Get-ChildItem $browserRoot -Directory -Filter "chromium_headless_shell-*")) {
+          throw "The browser download is missing Chromium headless shell."
+        }
+
+    - name: Download portable Node.js runtime
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $archiveName = "node-v${{ inputs.node-version }}-win-x64.zip"
+        $baseUrl = "https://nodejs.org/dist/v${{ inputs.node-version }}"
+        Invoke-WebRequest -Uri "$baseUrl/$archiveName" -OutFile $archiveName
+        Invoke-WebRequest -Uri "$baseUrl/SHASUMS256.txt" -OutFile "SHASUMS256.txt"
+
+        # 官方校验文件是唯一可信哈希来源，下载后必须在解压前核对。
+        $checksumLine = Select-String -Path "SHASUMS256.txt" -Pattern "  $([regex]::Escape($archiveName))$" | Select-Object -First 1
+        if (-not $checksumLine) {
+          throw "The official checksum file does not contain $archiveName."
+        }
+        $expectedHash = ($checksumLine.Line -split "\s+")[0].ToLowerInvariant()
+        $actualHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archiveName).Hash.ToLowerInvariant()
+        if ($actualHash -ne $expectedHash) {
+          throw "Node.js archive checksum mismatch."
+        }
+
+        Expand-Archive -LiteralPath $archiveName -DestinationPath ".node-runtime"
+
+    - name: Assemble offline package
+      id: package
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $packageVersion = node -p "require('./package.json').version"
+        $artifactName = "pi-web-$packageVersion-windows-x64"
+        $runtimeRoot = Join-Path $env:GITHUB_WORKSPACE ".node-runtime\node-v${{ inputs.node-version }}-win-x64"
+        & node "scripts/package-offline-windows-x64.mjs" `
+          --package-root $env:GITHUB_WORKSPACE `
+          --runtime-root $runtimeRoot `
+          --output-root "dist"
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to assemble the Windows offline package."
+        }
+
+        $archivePath = Join-Path "dist" "$artifactName.zip"
+        Compress-Archive -Path (Join-Path "dist" $artifactName) -DestinationPath $archivePath -CompressionLevel Optimal
+        $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        "$archiveHash  $artifactName.zip" | Set-Content -Path "dist\SHA256SUMS" -Encoding ascii
+
+        # 从最终校验文件重新读取并核对，防止上传不可直接使用的哈希记录。
+        $checksumRecord = (Get-Content "dist\SHA256SUMS").Trim() -split "\s+", 2
+        $verifiedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
+        if ($checksumRecord.Count -ne 2 -or $checksumRecord[0] -ne $verifiedHash -or $checksumRecord[1] -ne "$artifactName.zip") {
+          throw "The generated SHA256SUMS record is invalid."
+        }
+
+        # 写入步骤输出，后续冒烟测试和上传必须使用同一个产物名。
+        "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
+
+    - name: Smoke test packaged application
+      shell: pwsh
+      run: |
+        $ErrorActionPreference = "Stop"
+        $artifactName = "${{ steps.package.outputs.artifact_name }}"
+        $smokeRoot = Join-Path $env:RUNNER_TEMP "pi-web-offline-smoke"
+        if (Test-Path $smokeRoot) {
+          Remove-Item $smokeRoot -Recurse -Force
+        }
+        New-Item $smokeRoot -ItemType Directory | Out-Null
+        Expand-Archive -LiteralPath "dist\$artifactName.zip" -DestinationPath $smokeRoot
+        $bundleRoot = Join-Path $smokeRoot $artifactName
+
+        # 确认交付包真正使用目标平台的内置 x64 Node.js。
+        if ((& "$bundleRoot\runtime\node.exe" -p "process.arch") -ne "x64") {
+          throw "Packaged Node.js is not x64."
+        }
+        if ((& "$bundleRoot\runtime\node.exe" -p "process.platform") -ne "win32") {
+          throw "Packaged Node.js is not for Windows."
+        }
+
+        $env:PATH = "$bundleRoot\runtime;$bundleRoot\app\node_modules\.bin;$env:PATH"
+        $env:PLAYWRIGHT_BROWSERS_PATH = "$bundleRoot\browsers"
+        if (-not (Get-Command playwright-cli.cmd -ErrorAction SilentlyContinue)) {
+          throw "The packaged Playwright wrapper is missing from PATH."
+        }
+        if (-not (Get-ChildItem "$bundleRoot\browsers" -Directory -Filter "chromium-*")) {
+          throw "The package is missing full Chromium."
+        }
+        if (-not (Get-ChildItem "$bundleRoot\browsers" -Directory -Filter "chromium_headless_shell-*")) {
+          throw "The package is missing Chromium headless shell."
+        }
+
+        # 清除 runner 可能注入的选择，证明包装器会默认启动离线包内的 Chromium。
+        Remove-Item Env:PLAYWRIGHT_MCP_BROWSER -ErrorAction SilentlyContinue
+        & playwright-cli.cmd --help | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+          throw "The packaged Playwright wrapper could not print help."
+        }
+
+        $playwrightError = $null
+        $closeExitCode = 0
+        try {
+          & playwright-cli.cmd -s=offline-smoke open about:blank | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "The packaged Chromium could not start."
+          }
+
+          $browserListJson = & playwright-cli.cmd --json list
+          if ($LASTEXITCODE -ne 0) {
+            throw "The packaged Playwright CLI could not list its browser session."
+          }
+          # 原生命令的多行 JSON 在 PowerShell 中是字符串数组，合并后再解析。
+          $browserList = ($browserListJson -join "`n") | ConvertFrom-Json
+          $browserSession = $browserList.browsers | Where-Object { $_.name -eq "offline-smoke" }
+          if (-not $browserSession -or $browserSession.status -ne "open" -or $browserSession.browserType -ne "chrome-for-testing") {
+            throw "The offline smoke session did not use bundled Chromium."
+          }
+
+          & playwright-cli.cmd -s=offline-smoke snapshot | Out-Null
+          if ($LASTEXITCODE -ne 0) {
+            throw "The packaged Chromium could not capture a snapshot."
+          }
+        } catch {
+          $playwrightError = $_
+        } finally {
+          # 无论验证是否成功都关闭会话，避免 daemon 和 Chromium 留在 runner 上。
+          & playwright-cli.cmd -s=offline-smoke close | Out-Null
+          $closeExitCode = $LASTEXITCODE
+        }
+        if ($playwrightError) {
+          throw $playwrightError
+        }
+        if ($closeExitCode -ne 0) {
+          throw "The packaged Chromium session could not close cleanly."
+        }
+
+        $stdoutLog = Join-Path $smokeRoot "server.stdout.log"
+        $stderrLog = Join-Path $smokeRoot "server.stderr.log"
+        $commandLine = "`"$bundleRoot\start.cmd`" --port 30141"
+        $server = Start-Process -FilePath $env:ComSpec `
+          -ArgumentList @("/d", "/c", $commandLine) `
+          -WorkingDirectory $bundleRoot `
+          -RedirectStandardOutput $stdoutLog `
+          -RedirectStandardError $stderrLog `
+          -PassThru
+
+        try {
+          $started = $false
+          for ($attempt = 0; $attempt -lt 30; $attempt += 1) {
+            try {
+              Invoke-WebRequest -Uri "http://127.0.0.1:30141/api/home" -UseBasicParsing | Out-Null
+              Invoke-WebRequest -Uri "http://127.0.0.1:30141/" -UseBasicParsing | Out-Null
+              $started = $true
+              break
+            } catch {
+              Start-Sleep -Seconds 1
+            }
+          }
+          if (-not $started) {
+            Get-Content $stdoutLog, $stderrLog -ErrorAction SilentlyContinue
+            throw "The packaged Pi Web server did not start within 30 seconds."
+          }
+        } finally {
+          if (-not $server.HasExited) {
+            # start.cmd 会再启动 node.exe，必须终止整个进程树以免占用 runner 端口。
+            & taskkill.exe /PID $server.Id /T /F | Out-Null
+          }
+        }
+
+    - name: Upload offline package
+      uses: actions/upload-artifact@v6
+      with:
+        name: ${{ steps.package.outputs.artifact_name }}
+        path: |
+          dist/${{ steps.package.outputs.artifact_name }}.zip
+          dist/SHA256SUMS
+        if-no-files-found: error
+        compression-level: 0
+        retention-days: 30
