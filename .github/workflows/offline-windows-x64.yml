@@ -1,0 +1,21 @@
+name: Build Windows x64 offline package (Windows 10 target)
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-offline-package:
+    name: Build Windows x64 offline package (Windows 10 target)
+    # GitHub 没有 Windows 10 托管标签；Server 2022 验证打包流程，Windows 10 兼容性仍需在目标机验收。
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      # 必须先检出仓库，后续步骤才能加载仓库内的 composite action。
+      - name: Checkout repository
+        uses: actions/checkout@v5
+
+      - name: Build offline package
+        uses: ./.github/actions/build-offline-windows-x64
