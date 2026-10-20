@@ -30,9 +30,10 @@ runs:
       shell: pwsh
       run: npm ci
 
-    - name: Run tests
+    - name: Run Windows package tests
       shell: pwsh
-      run: npm test
+      # 全量测试由 Linux CI 负责；这里仅运行跨平台的 Windows 打包回归，避免 POSIX 专用测试阻断产物验证。
+      run: node --test lib/offline-windows-package.test.mjs
 
     - name: Build production application
       shell: pwsh
