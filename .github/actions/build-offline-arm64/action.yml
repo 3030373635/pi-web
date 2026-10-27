@@ -189,7 +189,8 @@ runs:
         playwright-cli -s=offline-smoke snapshot > /dev/null
         playwright-cli -s=offline-smoke close > /dev/null
 
-        "${bundle_root}/start.sh" --port 30141 > "${smoke_root}/server.log" 2>&1 &
+        # 冒烟服务由 CI 管理进程和日志，即使存在 DISPLAY 也不创建图形终端。
+        PI_WEB_NO_TERMINAL=1 "${bundle_root}/start.sh" --port 30141 > "${smoke_root}/server.log" 2>&1 &
         server_pid=$!
         trap 'kill "${server_pid}" 2>/dev/null || true' EXIT
 
