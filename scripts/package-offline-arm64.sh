@@ -104,6 +104,27 @@ set -eu
 bundle_root=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 cd "${bundle_root}"
 
+# Linux 文件管理器直接运行脚本时没有 TTY，需要显式创建终端才能显示日志和接收 Ctrl+C。
+# PI_WEB_NO_TERMINAL=1 用于 CI、重定向日志等明确不需要窗口的启动场景。
+if [ "${PI_WEB_NO_TERMINAL:-0}" != 1 ] && [ "$(uname -s)" = Linux ] &&
+   [ ! -t 0 ] && [ ! -t 1 ] && [ -n "${DISPLAY:-}${WAYLAND_DISPLAY:-}" ]; then
+  # 参数均按独立 argv 传递，避免解压路径或用户参数中的空格、引号被当作 shell 代码。
+  # 新终端重新执行脚本以初始化运行环境；显式禁用再次弹窗，防止递归启动。
+  set -- sh -c 'PI_WEB_NO_TERMINAL=1 exec sh "$@"' sh "${bundle_root}/start.sh" "$@"
+  for terminal in x-terminal-emulator gnome-terminal mate-terminal xfce4-terminal konsole xterm; do
+    if command -v "${terminal}" >/dev/null 2>&1; then
+      # 各终端接收完整命令参数的选项不同，不能统一使用解析字符串的 --command。
+      case "${terminal}" in
+        gnome-terminal) exec "${terminal}" -- "$@" ;;
+        mate-terminal|xfce4-terminal) exec "${terminal}" -x "$@" ;;
+        *) exec "${terminal}" -e "$@" ;;
+      esac
+    fi
+  done
+  echo "未找到可用终端。请在终端中运行 sh start.sh，或设置 PI_WEB_NO_TERMINAL=1 无窗口启动。" >&2
+  exit 1
+fi
+
 # Agent 必须优先使用产物内的 Node.js、Python 和 npm 可执行文件。
 PATH="${bundle_root}/runtime/bin:${bundle_root}/app/node_modules/.bin${PATH:+:${PATH}}"
 # 浏览器路径随离线包位置动态解析，解压目录改变后仍可找到完整 Chromium。
