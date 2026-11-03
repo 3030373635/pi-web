@@ -195,7 +195,8 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await expectShows(tab, b.id);
     await page.reload({ waitUntil: "domcontentloaded" });
     await expectShows(page, a.id);
-    await tab.goto(`${base}/`, { waitUntil: "domcontentloaded" });
+    // 裸地址会由 tab-memory 的 router.replace 接管；以最终 URL/选中行/消息验证恢复就绪。
+    await tab.goto(`${base}/`, { waitUntil: "commit" });
     await expectShows(tab, b.id);
     await expectShows(page, a.id);
     await tab.close();
