@@ -21,6 +21,8 @@ Platform checks also drive the real composer with controlled native SSE deltas,
 Send/Stop, compaction and cancellation, file selection/upload, image bytes and
 synthetic rich-text paste. The standalone offline document is checked separately
 because it does not load the application's CSS or compatibility startup script.
+Chrome 103 navigation traces keep screenshots/network/actions with DOM snapshots
+disabled; all interaction assertions still run, while current Chromium keeps DOM snapshots.
 
 Adapted from @Nuctori's CI/E2E proposal in #617 and #599. The performance
 scanner, reverse reader, sidebar changes, and timing benchmarks are not included.

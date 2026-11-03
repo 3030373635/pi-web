@@ -54,7 +54,8 @@ export async function checkProjectNavigation({ browser, base, artifacts, fixture
       // 新标签事件属于 context；只设置 page 超时不能限制 waitForEvent("page")。
       context.setDefaultTimeout(30_000);
       context.setDefaultNavigationTimeout(90_000);
-      await context.tracing.start({ screenshots: true, snapshots: true });
+      // Chrome 103 的跨标签 trace 使用截图/网络记录，避免新驱动的 DOM 扫描介入导航。
+      await context.tracing.start({ screenshots: true, snapshots: !browser.version().startsWith("103.") });
       const errors = [];
       const forbidden = [];
       const forbiddenCommands = new Set(["prompt", "steer", "follow_up", "fork", "fork_branch", "clone", "new_session", "abort", "abort_bash"]);

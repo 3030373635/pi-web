@@ -27,7 +27,9 @@ async function boundedProtocolStep(operation, label, timeoutMs = 30_000) {
 
 export async function checkSessionNavigation({ browser, base, artifacts, a, b, api, deleteSession }) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
-  await context.tracing.start({ screenshots: true, snapshots: true });
+  // 新版 trace 在动作结束后额外读取 DOM；103 跨标签重载使用不注入扫描脚本的记录方式。
+  // 103 保留截图/网络/动作记录；实际 UI 断言继续全部执行。
+  await context.tracing.start({ screenshots: true, snapshots: !browser.version().startsWith("103.") });
   const errors = [];
   const pendingRequests = new Map();
   context.on("request", (request) => pendingRequests.set(request, `${request.method()} ${request.url()}`));
