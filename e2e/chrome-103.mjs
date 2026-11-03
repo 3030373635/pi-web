@@ -242,6 +242,9 @@ try {
   }
   writeFileSync(join(artifacts, "versions.json"), JSON.stringify(versions, null, 2));
 } catch (error) {
+  // 将实际错误写入 Actions annotation，公开运行页也可直接定位失败，无需读取凭据。
+  const details = String(error.stack || error).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  console.error(`::error title=Windows browser regression::${details}`);
   await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {});
   await context?.tracing.stop({ path: join(artifacts, "failure-trace.zip") }).catch(() => {});
   throw error;
