@@ -123,7 +123,8 @@ async function checkSettings(page, name) {
   assert.equal(await dark.isChecked(), true, "Keyboard Space selects the focused theme");
   await page.waitForFunction(() => {
     const input = document.querySelector(".settings-theme-option input:checked");
-    return input && getComputedStyle(input.parentElement).outlineStyle === "solid";
+    const style = input && getComputedStyle(input.parentElement);
+    return input?.matches(":focus-visible") && style.outlineStyle !== "none" && parseFloat(style.outlineWidth) >= 2;
   });
   await page.setViewportSize({ width: 1100, height: 500 });
   await page.locator(".settings-general").evaluate((element) => { element.scrollTop = element.scrollHeight; });
@@ -188,7 +189,7 @@ try {
     await showSidebarFiles(page);
     await page.getByTitle(join(project, "notes.txt").replace(/\\/g, "/"), { exact: true }).click();
     await page.locator("#file-panel").getByText("Chrome 103 file viewer", { exact: false }).waitFor();
-    await page.getByRole("button", { name: "Hide file panel", exact: true }).click();
+    await page.locator("#file-panel").getByRole("button", { name: "Hide file panel", exact: true }).click();
     await checkSettings(page, target.name);
     await page.getByRole("button", { name: "Debug", exact: true }).click();
     const debug = page.getByRole("region", { name: "Debug: connections and server state", exact: true });
