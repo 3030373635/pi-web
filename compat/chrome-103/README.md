@@ -13,6 +13,7 @@
 ## 跟随上游更新
 
 1. 合并上游时保留三个接入点及本目录。上游若新增相同 glob 的 Turbopack 规则，需合并 loader 列表，不能互相覆盖。
+   PostCSS 的本地插件路径必须相对配置文件解析为绝对路径：Turbopack 在 `.next/dev/build` worker 中加载插件，直接保留相对字符串会找不到模块。
 2. 保留 npm `files` 和离线打包脚本中的 `compat`，否则生产启动无法加载 Next 配置。`lightningcss` 是构建依赖。
 3. 运行 **Chrome 103 Windows compatibility** Actions。测试使用固定官方 Chromium 快照 1002885（103.0.5060.0），核对下载校验和和浏览器实际版本，同时验证当前 Chromium。
 4. 下载 `chrome-103-windows-results` 查看截图、trace、服务日志及实际浏览器版本。测试不调用模型，也不修改真实用户配置。
