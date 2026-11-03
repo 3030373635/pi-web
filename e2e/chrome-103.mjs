@@ -170,7 +170,25 @@ let server;
 let browser;
 let context;
 let page;
+let cleanupTimer;
 const serverLog = createWriteStream(join(artifacts, "server.log"));
+
+/**
+ * 为失败取证和最终回收设置硬上限，浏览器协议卡住时仍保存报告并让 CI 明确失败。
+ * 无参数：只清理本次启动的隔离服务 PID；Windows runner 会回收本作业剩余浏览器进程。
+ */
+function armCleanupDeadline() {
+  if (cleanupTimer) return;
+  cleanupTimer = setTimeout(() => {
+    saveCoverage();
+    console.error(`::error title=Windows browser cleanup timed out::${currentPhase}; browser/trace cleanup exceeded 20 seconds`);
+    if (server?.pid && process.platform === "win32") {
+      try { execFileSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore", timeout: 5000 }); } catch { /* 作业结束后 runner 继续回收进程。 */ }
+    }
+    process.exit(1);
+  }, 20_000);
+  cleanupTimer.unref();
+}
 try {
   assert.ok(process.env.CHROME_103_PATH, "CHROME_103_PATH must point to the real Chromium 103 executable");
   const probe = createServer();
@@ -354,6 +372,7 @@ try {
   writeFileSync(join(artifacts, "versions.json"), JSON.stringify(versions, null, 2));
 } catch (error) {
   saveCoverage();
+  armCleanupDeadline();
   // 将实际错误写入 Actions annotation，公开运行页也可直接定位失败，无需读取凭据。
   const surfaces = await page?.locator('[role="menu"]:visible, [role="dialog"]:visible').allTextContents().catch(() => []);
   const message = `${currentPhase}\n${error.stack || error}\nBrowser exceptions: ${browserErrors.join(" | ").slice(0, 1500) || "none"}\nVisible dialogs/menus: ${surfaces?.join(" | ").slice(0, 2000) || "none"}`;
@@ -363,6 +382,7 @@ try {
   await context?.tracing.stop({ path: join(artifacts, "failure-trace.zip") }).catch(() => {});
   throw error;
 } finally {
+  armCleanupDeadline();
   await browser?.close();
   if (server?.pid && server.exitCode === null && server.signalCode === null) {
     const exited = once(server, "exit");
@@ -381,4 +401,5 @@ try {
   }
   serverLog.end();
   rmSync(agentDir, { recursive: true, force: true, maxRetries: 20, retryDelay: 100 });
+  clearTimeout(cleanupTimer);
 }

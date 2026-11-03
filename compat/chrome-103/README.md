@@ -27,6 +27,6 @@ Windows workflow 执行 lint、typecheck、兼容转换/API 和 Windows 打包�
 
 全站验收进一步分成 `core`、`settings`、`content`、`platform`、`navigation` 五套。构建一次后，Windows 矩阵独立执行各套的生产/开发模式及103/当前浏览器，共20组执行；`e2e/chrome-103-cases.json` 列出明确的验收ID。汇总作业要求每个ID在对应执行中实际记录成功，缺少一组、某项未执行或只有部分报告都会失败。
 
-`chrome-103-full-site-coverage` artifact 中的 JSON 保存每项动作、模拟服务标记和平台边界。设置表单和外部认证/终端协议由受控服务驱动真实组件；本地会话、文件、真实Git工作树等直接访问隔离的应用服务。内容套件采用headed Chromium，测试真实DOCX转换、PCM WAV、VP8 WebM、原生PDF可观测状态；不同编码器、OS通知、真实模型/第三方登录/安装、实际PTY以及Win10具体机器不能由模拟服务的成功代替。
+`chrome-103-full-site-coverage` artifact 中的 JSON 保存每项动作、模拟服务标记和平台边界。设置表单和外部认证/终端协议由受控服务驱动真实组件；本地会话、文件、真实Git工作树和附件上传直接访问隔离的应用服务。内容套件采用headed Chromium，测试真实DOCX转换、PCM WAV、VP8 WebM；原生PDF通过两页独特色块的真实iframe截图像素，验证第2页→第1页→第2页的实际绘制。不同编码器、OS通知、真实模型/第三方登录/安装、实际PTY以及Win10具体机器不能由模拟服务的成功代替。
 
 未来上游若增加新的浏览器 API、CSS 功能或三方依赖，这一层不会自动保证其兼容，需由同一工作流发现并补充回退。

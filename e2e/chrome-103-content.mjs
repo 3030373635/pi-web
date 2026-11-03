@@ -8,6 +8,7 @@ import { showSidebarSessions } from "./sidebar.mjs";
 
 const CONTENT_SESSION = "chrome-103-content";
 const CONTENT_TITLE = "Chrome103 content fixture";
+const PDF_PAGE_COLORS = [[232, 45, 83], [21, 184, 166]];
 
 /**
  * 计算 PNG 和 ZIP 共用的 CRC32 校验值。
@@ -157,8 +158,10 @@ function createPdf(pageCount) {
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
   ];
   for (let index = 0; index < pageCount; index += 1) {
-    const stream = `BT /F1 24 Tf 40 700 Td (Chrome103 page ${index + 1}) Tj ET\n`;
-    bodies.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`);
+    const color = PDF_PAGE_COLORS[index % PDF_PAGE_COLORS.length].map((channel) => (channel / 255).toFixed(6)).join(" ");
+    // 色块只存在于真实 PDF 内容流；高页面避免窄面板同时显示两页的大部分色块。
+    const stream = `q ${color} rg 40 90 532 1420 re f Q\nBT /F1 24 Tf 40 1520 Td (Chrome103 page ${index + 1}) Tj ET\n`;
+    bodies.push(`<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 1600] /Resources << /Font << /F1 3 0 R >> >> /Contents ${5 + index * 2} 0 R >>`);
     bodies.push(`<< /Length ${Buffer.byteLength(stream, "latin1")} >>\nstream\n${stream}endstream`);
   }
   for (const [index, body] of bodies.entries()) {
@@ -421,150 +424,109 @@ async function boundedContentStep(operation, label, timeoutMs = 2000) {
 }
 
 /**
- * 保留单入口失败诊断，让其余真实观察路径继续；总预算耗尽仍抛出。
- * @param {Error & {code?:string}} error 浏览器操作的失败。
- * @param {string} label 包含 frame URL 的操作名称。
- * @param {object[]} diagnostics 当前探测轮次的诊断记录。
- * @param {unknown} fallback 单个入口失败的占位值，不能作为 PDF 成功证据。
- * @returns {unknown} 供下一条真实观察路径使用的后备值。
+ * 失败时只读收集原生 PDF 能力和浏览器级 target，能力标志本身不能证明绘制成功。
+ * @param {import('playwright').Page} page 应用主页面。
+ * @returns {Promise<object>} 有限时的能力、target 及操作失败诊断。
  */
-function pdfProbeFallback(error, label, diagnostics, fallback) {
-  if (error.code === "CONTENT_PROBE_DEADLINE") throw error;
-  diagnostics.push({ operation: label, error: error.message });
-  if (diagnostics.length > 20) diagnostics.shift();
-  return fallback;
+async function collectPdfDiagnostics(page) {
+  const diagnostics = { pageUrl: page.url(), frameUrls: page.frames().map((frame) => frame.url()), capabilities: null, targets: null, errors: [] };
+  // 参数为延迟操作和公开阶段；诊断失败仅保留错误，不代替原始像素断言。
+  const read = (operation, label, timeoutMs = 1500) => boundedContentStep(operation, label, timeoutMs).catch((error) => {
+    diagnostics.errors.push({ operation: label, error: error.message });
+    return null;
+  });
+  diagnostics.capabilities = await read(() => page.evaluate(() => ({
+    pdfViewerEnabled: navigator.pdfViewerEnabled ?? "not exposed",
+    plugins: Array.from(navigator.plugins, (plugin) => ({ name: plugin.name, filename: plugin.filename, description: plugin.description })),
+  })), "PDF failure diagnostics navigator; frame=" + page.url());
+  const session = await read(() => page.context().browser().newBrowserCDPSession(), "PDF failure diagnostics attach browser CDP");
+  if (session) {
+    try {
+      const targets = await read(() => session.send("Target.getTargets"), "PDF failure diagnostics browser Target.getTargets");
+      diagnostics.targets = targets?.targetInfos.map((target) => ({ type: target.type, url: target.url, title: target.title, browserContextId: target.browserContextId })) ?? null;
+    } finally {
+      await read(() => session.detach(), "PDF failure diagnostics detach browser CDP", 500);
+    }
+  }
+  return diagnostics;
 }
 
 /**
- * 读取真实 PDF 插件状态或其解码后的可访问文字，插件不可观测即失败。
- * @param {import('playwright').Page} page 包含 PDF iframe 的页面。
- * @param {number} expectedPage 期望的当前页码。
- * @returns {Promise<object>} 内置 viewer 的实际状态。
+ * 验证浏览器原生 PDF iframe 的真实截图色块，不能用 URL、插件壳或能力开关代替。
+ * @param {import('playwright').Page} page 用于离屏解码截图的应用主页面。
+ * @param {import('playwright').Locator} iframe 真实 PDF iframe。
+ * @param {{artifacts:string,browserMajor:string,expectedPage:number,step:number}} options 产物目录、浏览器版本、期望页码及往返步骤。
+ * @returns {Promise<object>} 已满足面积和主导比例要求的实际像素统计。
  */
-async function checkNativePdfViewer(page, expectedPage) {
-  const deadline = Date.now() + 25_000;
-  const sessions = [];
-  const attachedFrames = new Set([page.mainFrame()]);
-  const probeFailures = [];
-  let last = [];
-  let activeOperation = `native PDF setup; frame=${page.url()}`;
+async function checkNativePdfPixels(page, iframe, { artifacts, browserMajor, expectedPage, step }) {
+  const prefix = browserMajor + "-fullsite-native-pdf-" + step + "-page-" + expectedPage;
+  const screenshotPath = join(artifacts, prefix + ".png");
+  const statisticsPath = join(artifacts, prefix + ".json");
+  const attempts = [];
+  const started = Date.now();
+  const deadline = started + 15_000;
+  let activeOperation = "capture PDF iframe";
   let stopped = false;
-  // 每次调用都受剩余总预算约束，外层硬超时后不再发起新的协议操作。
-  const step = async (operation, label) => {
-    activeOperation = label;
-    const remaining = deadline - Date.now();
-    if (stopped || remaining <= 0) {
-      const error = new Error(`Native PDF total probe deadline reached: ${label}`);
-      error.code = "CONTENT_PROBE_DEADLINE";
-      throw error;
-    }
-    return boundedContentStep(operation, label, Math.min(2000, remaining));
-  };
   try {
     return await boundedContentStep(async () => {
-      const pageLabel = `frame=${page.url()}`;
-      const attachLabel = `PDF attach page CDP; ${pageLabel}`;
-      const cdp = await step(() => page.context().newCDPSession(page), attachLabel)
-        .catch((error) => pdfProbeFallback(error, attachLabel, probeFailures, null));
-      if (cdp) {
-        sessions.push({ session: cdp, label: pageLabel });
-        for (const command of ["DOM.enable", "Accessibility.enable"]) {
-          const label = `PDF ${command}; ${pageLabel}`;
-          await step(() => cdp.send(command), label).catch((error) => pdfProbeFallback(error, label, probeFailures, null));
-        }
-      }
       while (Date.now() < deadline && !stopped) {
-        last = [];
-        for (const frame of page.frames()) {
-          const frameLabel = `frame=${frame.url()}`;
-          if (!attachedFrames.has(frame)) {
-            attachedFrames.add(frame);
-            const label = `PDF attach frame CDP; ${frameLabel}`;
-            const frameSession = await step(() => page.context().newCDPSession(frame), label)
-              .catch((error) => pdfProbeFallback(error, label, probeFailures, null));
-            if (frameSession) {
-              sessions.push({ session: frameSession, label: frameLabel });
-              for (const command of ["DOM.enable", "Accessibility.enable"]) {
-                const commandLabel = `PDF ${command}; ${frameLabel}`;
-                await step(() => frameSession.send(command), commandLabel)
-                  .catch((error) => pdfProbeFallback(error, commandLabel, probeFailures, null));
+        try {
+          activeOperation = "PDF iframe.screenshot page=" + expectedPage;
+          const screenshot = await boundedContentStep(() => iframe.screenshot({ path: screenshotPath, timeout: 5000 }),
+            activeOperation + "; app=" + page.url(), Math.min(5000, Math.max(1, deadline - Date.now())));
+          if (stopped) throw new Error("PDF pixel probe stopped before screenshot decoding");
+          activeOperation = "app Image.decode and Canvas pixel scan page=" + expectedPage;
+          // 图片和 canvas 均不插入 DOM；只解析浏览器刚刚生成的真实 iframe 截图。
+          const pixels = await boundedContentStep(() => page.evaluate(async ({ encoded, colors }) => {
+            const image = new Image();
+            image.src = "data:image/png;base64," + encoded;
+            await image.decode();
+            const canvas = document.createElement("canvas");
+            canvas.width = image.naturalWidth;
+            canvas.height = image.naturalHeight;
+            const context = canvas.getContext("2d");
+            if (!context || !canvas.width || !canvas.height) throw new Error("Native PDF screenshot could not be decoded");
+            context.drawImage(image, 0, 0);
+            const rgba = context.getImageData(0, 0, canvas.width, canvas.height).data;
+            const counts = colors.map(() => 0);
+            for (let offset = 0; offset < rgba.length; offset += 4) {
+              if (rgba[offset + 3] < 250) continue;
+              for (let colorIndex = 0; colorIndex < colors.length; colorIndex += 1) {
+                const color = colors[colorIndex];
+                if (Math.abs(rgba[offset] - color[0]) <= 18 && Math.abs(rgba[offset + 1] - color[1]) <= 18 && Math.abs(rgba[offset + 2] - color[2]) <= 18) counts[colorIndex] += 1;
               }
             }
-          }
-          const label = `PDF frame.evaluate viewer properties; ${frameLabel}`;
-          const state = await step(() => frame.evaluate(() => {
-            const roots = [document];
-            for (let index = 0; index < roots.length; index += 1) {
-              for (const element of roots[index].querySelectorAll("*")) {
-                if (element.localName === "pdf-viewer") {
-                  const toolbar = element.shadowRoot?.querySelector("viewer-toolbar, viewer-pdf-toolbar-new, viewer-pdf-toolbar");
-                  return {
-                    method: "native-pdf-viewer-properties", url: location.href,
-                    pages: element.docLength_ ?? toolbar?.docLength,
-                    page: element.pageNo_ ?? toolbar?.pageNo,
-                    progress: element.loadProgress_ ?? toolbar?.loadProgress,
-                  };
-                }
-                if (element.shadowRoot) roots.push(element.shadowRoot);
-              }
-            }
-            return { url: location.href, viewer: false };
-          }), label).catch((error) => pdfProbeFallback(error, label, probeFailures, { url: frame.url(), error: error.message }));
-          last.push(state);
-          if (state.pages === 2 && state.page === expectedPage && state.progress === 100) return { ...state, probeDiagnostics: probeFailures };
+            return { width: canvas.width, height: canvas.height, counts };
+          }, { encoded: screenshot.toString("base64"), colors: PDF_PAGE_COLORS }), activeOperation + "; frame=" + page.url(),
+          Math.min(2000, Math.max(1, deadline - Date.now())));
+          if (stopped) throw new Error("PDF pixel probe stopped after screenshot decoding");
+          const expectedPixels = pixels.counts[expectedPage - 1];
+          const otherPixels = pixels.counts[expectedPage === 1 ? 1 : 0];
+          const expectedFraction = expectedPixels / (pixels.width * pixels.height);
+          const passed = expectedPixels >= 4000 && expectedFraction >= 0.05 && expectedPixels > otherPixels * 3;
+          const observation = { elapsedMs: Date.now() - started, expectedPage, expectedColor: PDF_PAGE_COLORS[expectedPage - 1],
+            ...pixels, expectedPixels, otherPixels, expectedFraction, dominantRatio: expectedPixels / Math.max(otherPixels, 1),
+            screenshot: prefix + ".png", passed };
+          attempts.push(observation);
+          writeFileSync(statisticsPath, JSON.stringify({ assertions: "expected color >=4000 pixels and >=5% image area and >3x other page color", attempts }, null, 2));
+          if (passed) return observation;
+        } catch (error) {
+          if (stopped) throw error;
+          attempts.push({ elapsedMs: Date.now() - started, operation: activeOperation, error: error.message });
+          writeFileSync(statisticsPath, JSON.stringify({ attempts }, null, 2));
         }
-        for (const { session, label: frameLabel } of sessions) {
-          // DevTools 只读 DOM 可以穿过插件的 closed shadow root，页面 JS 则不能。
-          const treeLabel = `PDF DOM.getDocument pierce; ${frameLabel}`;
-          const documentTree = await step(() => session.send("DOM.getDocument", { depth: -1, pierce: true }), treeLabel)
-            .catch((error) => pdfProbeFallback(error, treeLabel, probeFailures, null));
-          const nodes = documentTree ? [documentTree.root] : [];
-          for (let index = 0; index < nodes.length; index += 1) {
-            const node = nodes[index];
-            nodes.push(...(node.children ?? []), ...(node.shadowRoots ?? []));
-            if (node.contentDocument) nodes.push(node.contentDocument);
-            if (node.nodeName?.toLowerCase() !== "pdf-viewer") continue;
-            const resolveLabel = `PDF DOM.resolveNode viewer=${node.nodeId}; ${frameLabel}`;
-            const resolved = await step(() => session.send("DOM.resolveNode", { nodeId: node.nodeId }), resolveLabel)
-              .catch((error) => pdfProbeFallback(error, resolveLabel, probeFailures, null));
-            if (!resolved?.object?.objectId) continue;
-            const objectId = resolved.object.objectId;
-            try {
-              const callLabel = `PDF Runtime.callFunctionOn viewer properties; ${frameLabel}`;
-              const response = await step(() => session.send("Runtime.callFunctionOn", {
-                objectId, returnByValue: true,
-                functionDeclaration: "function() { return { method: 'native-pdf-cdp-properties', pages: this.docLength_, page: this.pageNo_, progress: this.loadProgress_ }; }",
-              }), callLabel).catch((error) => pdfProbeFallback(error, callLabel, probeFailures, null));
-              const state = response?.result?.value;
-              last.push(state);
-              if (state?.pages === 2 && state.page === expectedPage && state.progress === 100) return { ...state, probeDiagnostics: probeFailures };
-            } finally {
-              await boundedContentStep(() => session.send("Runtime.releaseObject", { objectId }), `PDF cleanup Runtime.releaseObject; ${frameLabel}`, 500)
-                .catch((error) => console.error(error.message));
-            }
-          }
-          const axLabel = `PDF Accessibility.getFullAXTree; ${frameLabel}`;
-          const accessibility = await step(() => session.send("Accessibility.getFullAXTree"), axLabel)
-            .catch((error) => pdfProbeFallback(error, axLabel, probeFailures, { nodes: [] }));
-          const expectedText = `Chrome103 page ${expectedPage}`;
-          const labels = accessibility.nodes.map((node) => String(node.name?.value ?? "").trim());
-          if (labels.includes(expectedText)) {
-            // 该文字只存在于 PDF 内容流；不把 iframe URL 或 embed 壳当解码成功。
-            return { method: "native-pdf-accessibility-text", decodedText: expectedText, probeDiagnostics: probeFailures,
-              pages: labels.includes("Chrome103 page 1") && labels.includes("Chrome103 page 2") ? 2 : null,
-              activePage: "not observable through AX; iframe fragment checked separately" };
-          }
-          last.push({ method: "native-pdf-accessibility-text", decodedTextFound: false, nodeCount: accessibility.nodes.length });
-        }
-        await step(() => delay(200), "PDF wait for observable plugin state");
+        await delay(200);
       }
-      assert.fail(`Native Chromium PDF viewer must expose loaded page ${expectedPage} state or its decoded PDF text; observed=${JSON.stringify(last)}; probeFailures=${JSON.stringify(probeFailures)}`);
-    }, () => `Native PDF total probe; active operation=${activeOperation}; observed=${JSON.stringify(last)}; probeFailures=${JSON.stringify(probeFailures)}`, 25_000);
+      throw new Error("Native PDF page " + expectedPage + " never produced sufficient dominant fixture-colored pixels");
+    }, () => "Native PDF pixel total deadline; active=" + activeOperation + "; attempts=" + JSON.stringify(attempts), 15_000);
+  } catch (error) {
+    stopped = true;
+    const diagnostics = await collectPdfDiagnostics(page);
+    writeFileSync(statisticsPath, JSON.stringify({ attempts, error: error.message, diagnostics }, null, 2));
+    throw new Error("Native PDF rasterization not proven for page " + expectedPage + ": " + error.message
+      + "; pixel statistics=" + JSON.stringify(attempts) + "; browser diagnostics=" + JSON.stringify(diagnostics));
   } finally {
     stopped = true;
-    // 并行且逐项限时，插件失去执行上下文时 detach 也不能挂住失败清理。
-    await Promise.all(sessions.map(({ session, label }) => boundedContentStep(() => session.detach(), `PDF cleanup detach CDP; ${label}`, 1000)
-      .catch((error) => console.error(error.message))));
   }
 }
 
@@ -774,21 +736,23 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     const pdfBytes = await pdfResponse.body();
     assert.equal(pdfBytes.length, fixtures.pdfBytes);
     assert.equal(pdfBytes.subarray(0, 8).toString(), "%PDF-1.4");
+    const nativePdfEnabled = process.env.CHROME_103_NATIVE_PDF === "1";
+    const nativePdfSteps = [];
+    if (nativePdfEnabled) nativePdfSteps.push(await checkNativePdfPixels(page, pdfFrame, { artifacts, browserMajor, expectedPage: 2, step: 1 }));
     await openContentFile(page, "pdf");
     await page.waitForFunction(() => {
       const frame = document.querySelector("#file-panel iframe");
       return frame && !frame.getAttribute("src").includes("#page=");
     });
     assert.equal((await pdfFrame.getAttribute("src")).includes("#page="), false);
+    if (nativePdfEnabled) nativePdfSteps.push(await checkNativePdfPixels(page, pdfFrame, { artifacts, browserMajor, expectedPage: 1, step: 2 }));
     await openContentFile(page, "pdf page 2");
     await page.waitForFunction(() => document.querySelector("#file-panel iframe")?.getAttribute("src").endsWith("#page=2"));
     assert.match(await pdfFrame.getAttribute("src"), /#page=2$/);
     record("files.pdf-integration", "real-file-api: application/pdf bytes/header/length validated; iframe page=2 → no fragment → page=2; native plugin verification recorded separately when CHROME_103_NATIVE_PDF=1");
-    if (process.env.CHROME_103_NATIVE_PDF === "1") {
-      const nativePdf = await checkNativePdfViewer(page, 2);
-      record("files.pdf-native", `real-browser-plugin: ${JSON.stringify(nativePdf)}; native PDF raster pixels are not compared`);
-      await boundedContentStep(() => pdfFrame.screenshot({ path: join(artifacts, `${browserMajor}-fullsite-native-pdf-page-2.png`) }),
-        `Native PDF screenshot; page=${page.url()}`, 5000);
+    if (nativePdfEnabled) {
+      nativePdfSteps.push(await checkNativePdfPixels(page, pdfFrame, { artifacts, browserMajor, expectedPage: 2, step: 3 }));
+      record("files.pdf-native", `real-browser-native-raster: ${JSON.stringify(nativePdfSteps)}; actual iframe PNG pixels validate fixed PDF page 2 → 1 → 2; each target color >=4000 pixels, >=5% screenshot area and >3x the other page color; arbitrary PDF fonts/forms are outside this fixed-fixture check; no private viewer DOM used`);
     }
     await page.screenshot({ path: join(artifacts, `${browserMajor}-fullsite-content-files.png`) });
     await panel.getByRole("button", { name: "Hide file panel", exact: true }).click();

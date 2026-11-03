@@ -459,12 +459,31 @@ async function checkTerminal(page, { project, terminalRequests, artifacts, recor
   await waitEvidence(() => terminalRequests.filter((request) => request.body?.type === "input").map((request) => request.body.data).join("").includes("chrome103-input\r"), "xterm must send the typed input to the terminal API");
   // 由服务按回车合并真实输入请求，既验证键盘发送，也验证 SSE 内容进入 xterm。
   await page.waitForFunction(() => document.querySelector(".terminal-panel .xterm-rows")?.textContent.includes("MOCK_ECHO:chrome103-input"));
+  // ready + 输入回显是初始化屏障；不同模式可能有多次初始化请求，主题验收只比较其后增量。
+  const initialCreateRequests = terminalRequests.filter((request) => request.method === "POST" && !request.body.type);
+  const initialStreamRequests = terminalRequests.filter((request) => request.path.endsWith("/events"));
+  const initialCreateCount = initialCreateRequests.length;
+  const initialStreamCount = initialStreamRequests.length;
+  assert.ok(initialCreateRequests.every((request) => request.body.id === creation.body.id), `Startup must keep one terminal id: ${JSON.stringify(terminalRequests)}`);
+  const terminalElement = await panel.locator(".xterm").elementHandle();
+  assert.ok(terminalElement);
   const beforeTheme = await panel.getAttribute("data-terminal-theme");
   const theme = panel.getByRole("button", { name: /Switch terminal to (light|dark) theme/ });
   await reachable(theme);
   await theme.click();
   await page.waitForFunction((before) => document.querySelector(".terminal-panel")?.dataset.terminalTheme !== before, beforeTheme);
-  assert.equal(terminalRequests.filter((request) => request.method === "POST" && !request.body.type).length, 1, "Theme switch preserves the shell and stream");
+  // 主题变化后再次走真实键盘 → HTTP input → 原生 SSE 回显，确认原终端仍可用。
+  await panel.locator(".xterm-helper-textarea").focus();
+  await page.keyboard.type("chrome103-theme-input");
+  await page.keyboard.press("Enter");
+  await waitEvidence(() => terminalRequests.filter((request) => request.body?.type === "input" && request.path.endsWith(creation.body.id)).map((request) => request.body.data).join("").includes("chrome103-theme-input\r"), "Theme switch must keep input bound to the original terminal id");
+  await page.waitForFunction(() => document.querySelector(".terminal-panel .xterm-rows")?.textContent.includes("MOCK_ECHO:chrome103-theme-input"));
+  const themeEvidence = JSON.stringify({ initialCreateCount, initialStreamCount, terminalId: creation.body.id, terminalRequests });
+  assert.equal(terminalRequests.filter((request) => request.method === "POST" && !request.body.type).length, initialCreateCount, `Theme switch must add no terminal creation request: ${themeEvidence}`);
+  assert.equal(terminalRequests.filter((request) => request.path.endsWith("/events")).length, initialStreamCount, `Theme switch must add no SSE connection request: ${themeEvidence}`);
+  assert.equal(await terminalElement.evaluate((element) => element.isConnected && element === document.querySelector(".terminal-panel .xterm")), true, `Theme switch must preserve the existing xterm instance: ${themeEvidence}`);
+  await terminalElement.dispose();
+  assert.equal(await page.evaluate(() => JSON.parse(sessionStorage.getItem("pi-web:terminal-tabs"))?.activeId), creation.body.id, `Theme switch must preserve the active terminal id: ${themeEvidence}`);
   await waitEvidence(() => terminalRequests.some((request) => request.body?.type === "resize"), "SSE open must initialize terminal dimensions");
   const initialResizeCount = terminalRequests.filter((request) => request.body?.type === "resize").length;
   const beforeDimensions = terminalRequests.filter((request) => request.body?.type === "resize").at(-1)?.body;
@@ -479,7 +498,7 @@ async function checkTerminal(page, { project, terminalRequests, artifacts, recor
   await close.click();
   await panel.waitFor({ state: "detached" });
   assert.ok(terminalRequests.some((request) => request.method === "DELETE" && request.path.endsWith(creation.body.id)), "Closing the tab must terminate its terminal id");
-  record("platform.terminal.lifecycle", { service: "mocked-service", assertions: "real xterm/native SSE output; keyboard input API + echo; theme keeps terminal; changed integer resize; DELETE on close", requests: terminalRequests.length });
+  record("platform.terminal.lifecycle", { service: "mocked-service", assertions: "real xterm/native SSE output; keyboard input API + echo before and after theme switch; theme adds zero create/SSE requests and keeps same xterm/terminal id; changed integer resize; DELETE on close", startup: { createRequests: initialCreateCount, streamRequests: initialStreamCount, terminalId: creation.body.id }, requests: terminalRequests.length });
   await page.setViewportSize({ width: 1280, height: 800 });
 }
 
