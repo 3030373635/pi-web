@@ -1,15 +1,18 @@
 {
   "core": [
+    "core.offline-page",
     "core.layout-and-runtime"
   ],
   "settings": [
     "settings.general.appearance-persistence",
+    "settings.general.cross-tab-font-sync",
     "settings.general.language",
     "settings.general.cache-notices",
     "settings.general.powershell",
     "settings.project.trust-confirm",
     "settings.mcp.code-mode-settings",
     "settings.models.custom-save",
+    "settings.models.advanced-editor",
     "settings.models.connection-test",
     "settings.models.discovery-import",
     "settings.models.context-window",
@@ -17,6 +20,7 @@
     "settings.models.api-key",
     "settings.models.oauth-paste",
     "settings.skills.detail-navigation",
+    "settings.skills.version-update",
     "settings.skills.visibility",
     "settings.skills.group-switch",
     "settings.skills.search-install",
@@ -28,6 +32,7 @@
     "settings.plugins.enable",
     "settings.plugins.group-switch",
     "settings.plugins.check-update",
+    "settings.plugins.update-all",
     "settings.plugins.remove",
     "settings.mcp.add-preview-test",
     "settings.mcp.enable-disable",
@@ -39,7 +44,8 @@
     "settings.mcp.sign-out",
     "settings.mcp.cancel-sign-in",
     "settings.mcp.remove-undo",
-    "settings.models.default-star"
+    "settings.models.default-star",
+    "settings.models.default-reasoning-star"
   ],
   "content": [
     "content.markdown",
@@ -64,6 +70,11 @@
     "chat.composer-selectors"
   ],
   "platform": [
+    "platform.chat.prompt-stream-settle",
+    "platform.chat.stop-abort",
+    "platform.chat.compact",
+    "platform.chat.attach-upload-image",
+    "platform.chat.rich-paste",
     "platform.login.error-retry-success",
     "platform.terminal.lifecycle",
     "platform.subagent.transcript",

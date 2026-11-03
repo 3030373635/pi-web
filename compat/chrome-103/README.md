@@ -10,6 +10,7 @@
 - `init.cjs`：在应用代码前补充缺失 API。旧浏览器使用 `vh`；混色按当前主题计算预乘 alpha 的 sRGB 颜色，主题切换、动态内联样式和后加载的样式表会更新。原生 oklab 混色在旧浏览器近似为 sRGB；`currentColor` 混色采用根文本颜色，属于视觉回退，并非完整 CSS Color 规范 polyfill。
 - Mermaid 链接还依赖 `URL.canParse`，入口脚本只在该 API 缺失时安装基于原生 URL 构造器的回退，保留原生字符串转换异常。
 - `fallbacks.css`：设置表单的选中/焦点状态及 Debug 容器查询回退。
+- `public/offline.html` 是独立缓存的静态文档，不加载上述脚本和样式；保留其 `100vh` 声明作为 `100dvh` 的视口回退。
 
 ## 跟随上游更新
 
@@ -17,7 +18,7 @@
    PostCSS 通过 `postcss-path.cjs` 从配置报告的位置向上定位项目中的原始插件：Turbopack 会把配置定位到 `.next` 子目录，相对字符串会找不到模块；`new URL("./plugin", import.meta.url)` 又会把插件作为静态资源单独复制，丢失相对依赖。保留此定位器，不能替换成依赖 worker 位置的相对路径。
 2. 保留 npm `files` 和离线打包脚本中的 `compat`，否则生产启动无法加载 Next 配置。`lightningcss` 是构建依赖。
 3. 运行 **Chrome 103 Windows compatibility** Actions。测试使用固定官方 Chromium 快照 1002885（103.0.5060.0），核对下载校验和和浏览器实际版本，同时验证当前 Chromium。
-4. 下载 `chrome-103-windows-results` 查看截图、trace、服务日志及实际浏览器版本。测试不调用模型，也不修改真实用户配置。
+4. 下载 `chrome-103-<suite>-results` 查看各套截图、trace、服务日志及实际浏览器版本；汇总结果为 `chrome-103-full-site-coverage`。测试不调用模型，也不修改真实用户配置。
 5. 最后将离线包放到 Windows 10 1909 / Chrome 103.0.5060.134 验收。GitHub 托管 runner 为 Windows Server 2022，不能代替那台具体电脑。
 
 ## 测试范围

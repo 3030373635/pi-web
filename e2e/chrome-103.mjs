@@ -23,6 +23,7 @@ const mode = process.env.E2E_SERVER_MODE || "start";
 assert.ok(mode === "start" || mode === "dev", "E2E_SERVER_MODE must be start or dev");
 const suite = process.env.E2E_SUITE || "core";
 assert.ok(["core", "settings", "content", "platform", "navigation"].includes(suite), "Unknown E2E_SUITE");
+const expectedCases = JSON.parse(readFileSync(new URL("./chrome-103-cases.json", import.meta.url), "utf8"))[suite];
 const authPassword = suite === "platform" ? "chrome-103-ui-fixture" : "";
 const artifacts = join(root, "test-results/chrome-103", suite, mode);
 const agentDir = mkdtempSync(join(tmpdir(), "pi-web-chrome-103-"));
@@ -235,14 +236,23 @@ try {
       assert.ok(login.ok(), "Authenticate only against the isolated fixture service");
     }
     if (suite === "core" && target.name === "103") await checkOriginalRegression(page);
+    if (suite === "core") {
+      // 静态离线文档不经过应用的 PostCSS/布局脚本，必须单独检查视口回退。
+      await page.goto(`${base}/offline.html`);
+      await page.getByRole("heading", { name: "Pi Web is offline", exact: true }).waitFor();
+      assert.equal(await page.evaluate(() => parseFloat(getComputedStyle(document.body).minHeight) >= innerHeight), true, "Offline page must fill the viewport even without dvh support");
+      assert.equal(await page.locator("img").evaluate(async (element) => { await element.decode(); return element.naturalWidth > 0; }), true);
+      await assertReachable(page.getByRole("button", { name: "Try again", exact: true }));
+      await Promise.all([page.waitForEvent("domcontentloaded"), page.getByRole("button", { name: "Try again", exact: true }).click()]);
+      await page.getByRole("heading", { name: "Pi Web is offline", exact: true }).waitFor();
+      record("core.offline-page", { service: "real-static-document", assertions: "standalone offline page fills viewport; icon decoded; retry control reachable and reloads document" });
+    }
     await page.goto(`${base}/?session=${sessionId}`);
     await page.locator(".chat-input-textarea").waitFor();
     if (suite !== "core") {
       const checks = { settings: checkFullSiteSettings, content: checkFullSiteContent, platform: checkFullSitePlatform, navigation: checkFullSiteNavigation };
       const result = await checks[suite](page, { browser, base, project, artifacts, sessionId, authPassword, fixtures, record });
       report.limitations = result?.uncovered || [];
-      const minimum = { settings: 37, content: 19, platform: 9, navigation: 2 };
-      assert.ok(report.checks.length >= minimum[suite], `Missing coverage for ${suite}: ${report.checks.length}`);
     } else {
     await checkTranscript(page);
     await page.locator(".chat-input-textarea").fill("A preserved draft in Chrome 103");
@@ -323,6 +333,8 @@ try {
     assert.equal(repeatedReads, 0, "Unrelated style changes must not recompute cached colors on every scroll frame");
     record("core.layout-and-runtime", { service: "real-local-api", originalRegression: target.name === "103" ? "reproduced and repaired" : "not applicable; native viewport units", assertions: "transcript wheel; composer visibility and draft; small window; sidebar placements; text file; six settings surfaces (not their full workflows); theme mouse/keyboard; Debug/directory; reload; dynamic inline/CSSOM colors; no repeated canvas work" });
     }
+    // 每个浏览器立即核对完整清单，不能靠最低数量把遗漏或跳过的用例判为通过。
+    assert.deepEqual([...seen].sort(), [...expectedCases].sort(), `Coverage inventory mismatch: ${suite}/${mode}/${target.name}`);
     await page.screenshot({ path: join(artifacts, `${target.name}-after.png`) });
     assert.deepEqual(errors, [], "Application must not throw browser errors");
     report.passed = true;

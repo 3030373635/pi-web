@@ -17,6 +17,10 @@ Each report includes actual action evidence and service/platform boundaries.
 The platform suite enables an isolated synthetic web password for real login
 and logout routes. Content runs headed, with native PDF observation enabled by
 `CHROME_103_NATIVE_PDF=1`; media fixture coverage is PCM WAV and VP8 WebM.
+Platform checks also drive the real composer with controlled native SSE deltas,
+Send/Stop, compaction and cancellation, file selection/upload, image bytes and
+synthetic rich-text paste. The standalone offline document is checked separately
+because it does not load the application's CSS or compatibility startup script.
 
 Adapted from @Nuctori's CI/E2E proposal in #617 and #599. The performance
 scanner, reverse reader, sidebar changes, and timing benchmarks are not included.

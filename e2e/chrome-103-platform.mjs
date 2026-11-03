@@ -49,8 +49,9 @@ async function capture(page, artifacts, surface) {
  * 创建只提供测试事件的本地 HTTP 服务，保留浏览器原生 EventSource 与 xterm。
  * 有限 route.fulfill 响应会立刻关闭 SSE，故用重定向接入保持打开的流。
  * @param {string} project 终端夹具所属工作目录，仅用于事件内容。
+ * @param {object} state 受控会话状态，扩展状态与小组件随 SSE 同步以供重读。
  */
-async function createEventService(project) {
+async function createEventService(project, state) {
   const streams = new Map();
   const sockets = new Set();
   const terminalOffsets = new Map();
@@ -67,7 +68,13 @@ async function createEventService(project) {
     if (!streams.has(path)) streams.set(path, new Set());
     streams.get(path).add(response);
     opened.push(path);
-    request.on("close", () => streams.get(path)?.delete(response));
+    const heartbeat = setInterval(() => {
+      response.write(path === "/agent" ? 'data: {"type":"heartbeat"}\n\n' : ": heartbeat\n\n");
+    }, 15_000);
+    response.on("close", () => {
+      clearInterval(heartbeat);
+      streams.get(path)?.delete(response);
+    });
     if (path === "/agent") {
       response.write(`data: ${JSON.stringify({ type: "connected", isStreaming: false, pendingExtensionUiIds: [] })}\n\n`);
     } else {
@@ -88,6 +95,15 @@ async function createEventService(project) {
     opened,
     /** 向现有原生 SSE 连接发送事件；path 是流路径，event 是源码约定的事件对象。 */
     send(path, event) {
+      // 跟真实 wrapper 一样保留扩展状态，后续 get_state 不得用旧快照覆盖已显示的状态。
+      if (path === "/agent" && event.type === "extension_ui_request" && event.method === "setStatus") {
+        const rest = state.extensionStatuses.filter((item) => item.key !== event.statusKey);
+        state.extensionStatuses = event.statusText === undefined ? rest : [...rest, { key: event.statusKey, text: event.statusText }];
+      }
+      if (path === "/agent" && event.type === "extension_ui_request" && event.method === "setWidget") {
+        const rest = state.extensionWidgets.filter((item) => item.key !== event.widgetKey);
+        state.extensionWidgets = event.widgetLines === undefined ? rest : [...rest, { key: event.widgetKey, lines: event.widgetLines, placement: event.widgetPlacement ?? "aboveEditor" }];
+      }
       for (const response of streams.get(path) ?? []) response.write(`data: ${JSON.stringify(event)}\n\n`);
     },
     /** 回显终端输入；id 是终端标识，data 是已经由真实 xterm 发来的字符。 */
@@ -110,6 +126,238 @@ async function createEventService(project) {
       await new Promise((resolve) => service.close(resolve));
     },
   };
+}
+
+/**
+ * 创建模型服务替身，以源码的 RPC/SSE 协议驱动真实聊天组件并同步可读取历史。
+ * @param {object} snapshot 当前模拟会话快照，完成消息会追加到 context。
+ * @param {object} state 当前 RPC 状态，运行和压缩标志随交互变化。
+ * @param {object} events 原生 SSE 夹具服务。
+ */
+function createChatService(snapshot, state, events) {
+  let active = null;
+  let pendingCompact = null;
+  let sequence = 0;
+  const service = {
+    /** 保存一条完成消息；message 是源码约定的用户或助理消息。 */
+    append(message) {
+      snapshot.context.messages.push(message);
+      snapshot.context.entryIds.push(`platform-chat-${++sequence}`);
+    },
+    /** 开始模拟的一轮；command 是真实 composer 发来的 prompt 请求体。 */
+    begin(command) {
+      assert.equal(active, null, "Previous mocked turn must settle before another begins");
+      const images = command.images ?? [];
+      const user = { role: "user", timestamp: Date.now(), content: images.length
+        ? [{ type: "text", text: command.message }, ...images.map((image) => ({ type: "image", source: { type: "base64", media_type: image.mimeType, data: image.data } }))]
+        : command.message };
+      service.append(user);
+      active = { role: "assistant", provider: "fixture", model: "fixture", timestamp: Date.now(), content: [{ type: "text", text: "" }] };
+      state.isStreaming = true;
+      state.isPromptRunning = true;
+      events.send("/agent", { type: "agent_start" });
+      events.send("/agent", { type: "message_start", message: { role: "user" } });
+      events.send("/agent", { type: "message_end", message: user });
+      events.send("/agent", { type: "message_start", message: active });
+      events.send("/agent", { type: "message_update", assistantMessageEvent: { type: "text_start", contentIndex: 0 } });
+    },
+    /** 发送一个独立文本增量；text 是本次追加内容。 */
+    delta(text) {
+      assert.ok(active, "Streaming delta requires an active mocked turn");
+      active.content[0].text += text;
+      events.send("/agent", { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: text } });
+    },
+    /** 完成本轮并同步历史；aborted 表示用户点击 Stop 的停止路径。 */
+    finish(aborted = false) {
+      assert.ok(active, "Settlement requires an active mocked turn");
+      const completed = { ...active, stopReason: aborted ? "aborted" : "stop", durationMs: 100 };
+      service.append(completed);
+      state.isStreaming = false;
+      state.isPromptRunning = false;
+      events.send("/agent", { type: "message_update", assistantMessageEvent: { type: "text_end", contentIndex: 0, content: active.content[0].text } });
+      events.send("/agent", { type: "message_end", message: completed });
+      events.send("/agent", { type: "agent_end" });
+      events.send("/agent", { type: "agent_settled", aborted });
+      events.send("/agent", { type: "prompt_done", aborted });
+      active = null;
+    },
+    /** 保留阻塞的 compact 请求；route 为实际组件发来的受控 RPC 路由。 */
+    beginCompact(route) {
+      assert.equal(pendingCompact, null);
+      pendingCompact = route;
+      state.isCompacting = true;
+      events.send("/agent", { type: "compaction_start" });
+    },
+    /** 完成或取消压缩；aborted 决定请求返回压缩结果还是取消错误。 */
+    async finishCompact(aborted = false) {
+      assert.ok(pendingCompact, "Compaction settlement requires a pending compact request");
+      const route = pendingCompact;
+      pendingCompact = null;
+      state.isCompacting = false;
+      const result = { tokensBefore: 900, estimatedTokensAfter: 300 };
+      events.send("/agent", { type: "compaction_end", aborted, ...(aborted ? {} : { result }) });
+      await route.fulfill(aborted
+        ? { status: 400, json: { error: "Compaction aborted by fixture user" } }
+        : { json: { success: true, data: result } });
+    },
+    /** 释放失败途中仍阻塞的请求；无参数，仅影响本次模拟服务。 */
+    async close() {
+      if (pendingCompact) {
+        const route = pendingCompact;
+        pendingCompact = null;
+        await route.abort().catch(() => {});
+      }
+      active = null;
+      state.isStreaming = false;
+      state.isPromptRunning = false;
+      state.isCompacting = false;
+    },
+  };
+  return service;
+}
+
+/**
+ * 验证真实 composer 的普通发送、分段流式显示、完成和 Stop/abort 停止闭环。
+ * @param {import("playwright").Page} page 当前应用页面。
+ * @param {object} options chat 为受控模型服务，events 为 SSE 服务，agentCommands 为真实请求日志，artifacts 为截图目录，record 为成功记录器。
+ */
+async function checkChatLifecycle(page, { chat, events, agentCommands, artifacts, record }) {
+  const composer = page.locator(".chat-input-textarea");
+  const send = page.getByRole("button", { name: "Send", exact: true });
+  const stop = page.getByRole("button", { name: "Stop agent", exact: true });
+  await composer.fill("PLATFORM_CHAT_COMPLETE");
+  await reachable(send);
+  await send.click();
+  await waitEvidence(() => agentCommands.some((command) => command.type === "prompt" && command.message === "PLATFORM_CHAT_COMPLETE"), "Send must deliver the composer text to POST agent prompt");
+  const command = agentCommands.find((value) => value.type === "prompt" && value.message === "PLATFORM_CHAT_COMPLETE");
+  assert.deepEqual(command, { type: "prompt", message: "PLATFORM_CHAT_COMPLETE" });
+  await stop.waitFor();
+  await page.getByText("PLATFORM_CHAT_COMPLETE", { exact: true }).waitFor();
+  chat.delta("PLATFORM_STREAM_FIRST");
+  await page.getByText("PLATFORM_STREAM_FIRST", { exact: true }).waitFor();
+  assert.equal(await stop.isVisible(), true, "First streamed delta must render before the turn settles");
+  chat.delta(" SECOND_DELTA");
+  await page.getByText("PLATFORM_STREAM_FIRST SECOND_DELTA", { exact: true }).waitFor();
+  await capture(page, artifacts, "chat-streaming");
+  chat.finish();
+  await stop.waitFor({ state: "hidden" });
+  await page.getByText("PLATFORM_STREAM_FIRST SECOND_DELTA", { exact: true }).waitFor();
+  assert.equal(await page.getByText("PLATFORM_STREAM_FIRST SECOND_DELTA", { exact: true }).count(), 1, "History reconciliation must not duplicate the completed assistant reply");
+  assert.equal(await page.getByText("PLATFORM_CHAT_COMPLETE", { exact: true }).count(), 1, "Delivered user event and history reconciliation must preserve one user bubble");
+  assert.equal(await composer.inputValue(), "");
+  record("platform.chat.prompt-stream-settle", { service: "mocked-service", assertions: "real composer Send -> exact prompt JSON; first and second native SSE delta render while Stop remains; message_end + agent_settled + prompt_done reconcile one persisted reply; composer clears" });
+
+  await composer.fill("PLATFORM_CHAT_STOP");
+  await send.click();
+  await waitEvidence(() => agentCommands.some((value) => value.type === "prompt" && value.message === "PLATFORM_CHAT_STOP"), "Stop scenario must start through the real composer");
+  await stop.waitFor();
+  chat.delta("PLATFORM_STOP_PARTIAL");
+  await page.getByText("PLATFORM_STOP_PARTIAL", { exact: true }).waitFor();
+  await reachable(stop);
+  await stop.click();
+  await waitEvidence(() => agentCommands.some((value) => value.type === "abort"), "Stop must send the abort command");
+  assert.deepEqual(agentCommands.find((value) => value.type === "abort"), { type: "abort" });
+  await stop.waitFor({ state: "hidden" });
+  await page.getByText("PLATFORM_STOP_PARTIAL", { exact: true }).waitFor();
+  // 同一流的后续状态作为屏障，保证迟到增量已被客户端处理后再判断是否出现幽灵回复。
+  events.send("/agent", { type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "PLATFORM_LATE_GHOST" } });
+  events.send("/agent", { type: "extension_ui_request", id: "platform-late-sentinel", method: "setStatus", statusKey: "platform-late-sentinel", statusText: "PLATFORM_LATE_SENTINEL" });
+  await page.getByText("PLATFORM_LATE_SENTINEL", { exact: true }).waitFor();
+  assert.equal(await page.getByText("PLATFORM_LATE_GHOST", { exact: false }).count(), 0, "Late deltas after aborted settle must not resurrect a streaming reply");
+  await composer.fill("Composer usable after abort");
+  assert.equal(await send.isEnabled(), true);
+  await composer.fill("");
+  await capture(page, artifacts, "chat-aborted");
+  record("platform.chat.stop-abort", { service: "mocked-service", assertions: "real running Stop button -> exact abort JSON; aborted message/settle/prompt_done preserve partial reply; late delta ignored behind SSE barrier; composer accepts another draft" });
+}
+
+/**
+ * 验证 Compact 按钮、带指令的 /compact，以及 Stop compaction 的阻塞请求取消。
+ * @param {import("playwright").Page} page 当前应用页面。
+ * @param {object} options chat 为压缩服务替身，agentCommands 为请求日志，artifacts 为截图目录，record 为成功记录器。
+ */
+async function checkChatCompaction(page, { chat, agentCommands, artifacts, record }) {
+  const composer = page.locator(".chat-input-textarea");
+  const compact = page.getByRole("button", { name: "Compact context", exact: true });
+  await reachable(compact);
+  await compact.focus();
+  // 键盘激活 detail=0，按组件约定不会被运行结束后 600ms 的防误点击规则吞掉。
+  await page.keyboard.press("Enter");
+  await waitEvidence(() => agentCommands.some((value) => value.type === "compact"), "Compact button must send the compact command");
+  await page.getByRole("button", { name: "Stop compaction", exact: true }).waitFor();
+  assert.equal(await composer.isEnabled(), true, "Pending manual compaction must keep the composer editable");
+  await chat.finishCompact();
+  await page.getByRole("button", { name: "Stop compaction", exact: true }).waitFor({ state: "hidden" });
+  await page.getByText(/Compacted 900 -> 300 tokens/).waitFor();
+  await composer.fill("/compact PLATFORM_COMPACT_INSTRUCTIONS");
+  await composer.press("Enter");
+  await waitEvidence(() => agentCommands.some((value) => value.type === "compact" && value.customInstructions === "PLATFORM_COMPACT_INSTRUCTIONS"), "Builtin /compact must forward customInstructions");
+  const abort = page.getByRole("button", { name: "Stop compaction", exact: true });
+  await reachable(abort);
+  assert.equal(await composer.isEnabled(), true, "Builtin /compact must release its fieldset while the request is pending");
+  await abort.click();
+  await waitEvidence(() => agentCommands.some((value) => value.type === "abort_compaction"), "Stop compaction must send abort_compaction");
+  await abort.waitFor({ state: "hidden" });
+  await page.getByText("Compaction aborted by fixture user", { exact: true }).waitFor();
+  await page.getByRole("button", { name: "Dismiss compaction error", exact: true }).click();
+  await page.getByText("Compaction aborted by fixture user", { exact: true }).waitFor({ state: "hidden" });
+  await composer.fill("");
+  await capture(page, artifacts, "chat-compaction");
+  record("platform.chat.compact", { service: "mocked-service", assertions: "Compact context -> compact; pending state keeps input enabled; result token banner; /compact customInstructions; Stop compaction -> abort_compaction; cancelled request error and dismiss" });
+}
+
+/**
+ * 验证附件按钮的真实文件选择、非图片上传、图片原字节发送及富文本粘贴处理。
+ * @param {import("playwright").Page} page 当前应用页面。
+ * @param {object} options chat 为模型替身，agentCommands/uploadRequests 为请求日志，artifacts 为截图目录，record 为成功记录器。
+ */
+async function checkChatAttachments(page, { chat, agentCommands, uploadRequests, artifacts, record }) {
+  const composer = page.locator(".chat-input-textarea");
+  const attach = page.getByRole("button", { name: "Attach files", exact: true });
+  await reachable(attach);
+  const chooserEvent = page.waitForEvent("filechooser");
+  await attach.click();
+  const chooser = await chooserEvent;
+  // 只创建内存中的标准 1×1 PNG 与文本文件，不读取或写入用户文件。
+  const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
+  await chooser.setFiles([
+    { name: "platform-image.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") },
+    { name: "platform-upload.txt", mimeType: "text/plain", buffer: Buffer.from("PLATFORM_UPLOAD_BYTES", "utf8") },
+  ]);
+  await waitEvidence(() => uploadRequests.length === 1, "Non-image selection must use the upload API once");
+  await page.waitForFunction(() => document.querySelector(".chat-input-textarea")?.value.includes("@platform-upload.txt"));
+  await page.getByText("Copied 1 file(s) into the working directory", { exact: true }).waitFor();
+  const preview = page.locator('.chat-input-shell img[src^="blob:"]');
+  await preview.waitFor();
+  await page.waitForFunction(() => {
+    const image = document.querySelector('.chat-input-shell img[src^="blob:"]');
+    return image?.complete && image.naturalWidth === 1;
+  });
+  await capture(page, artifacts, "chat-attachments");
+  await composer.fill("PLATFORM_CHAT_IMAGE");
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await waitEvidence(() => agentCommands.some((value) => value.type === "prompt" && value.message === "PLATFORM_CHAT_IMAGE"), "Image prompt must reach the same agent endpoint");
+  const imageCommand = agentCommands.find((value) => value.type === "prompt" && value.message === "PLATFORM_CHAT_IMAGE");
+  assert.deepEqual(imageCommand.images, [{ type: "image", data: png, mimeType: "image/png" }], "Image must retain its original PNG bytes rather than canvas conversion");
+  chat.delta("PLATFORM_IMAGE_ACCEPTED");
+  await page.getByText("PLATFORM_IMAGE_ACCEPTED", { exact: true }).waitFor();
+  chat.finish();
+  await page.getByRole("button", { name: "Stop agent", exact: true }).waitFor({ state: "hidden" });
+  await preview.waitFor({ state: "detached" });
+  record("platform.chat.attach-upload-image", { service: "mocked-service", assertions: "real Attach files chooser; multipart files field + original filename/bytes; conflict=skip; success notice and @mention; decoded image preview; prompt images preserve exact PNG bytes; SSE reply settles and preview clears", uploads: uploadRequests.length });
+
+  await composer.fill("");
+  // ClipboardEvent 只模拟剪贴板数据；由真实 textarea 的 onPaste 完成 Markdown 转换，未注入 DOM。
+  await composer.evaluate((element) => {
+    const data = new DataTransfer();
+    data.setData("text/plain", "Platform pasted link");
+    data.setData("text/html", '<a href="https://example.com/platform-paste">Platform pasted link</a>');
+    element.dispatchEvent(new ClipboardEvent("paste", { bubbles: true, cancelable: true, clipboardData: data }));
+  });
+  await page.waitForFunction(() => document.querySelector(".chat-input-textarea")?.value === "[Platform pasted link](https://example.com/platform-paste)");
+  assert.equal(await composer.inputValue(), "[Platform pasted link](https://example.com/platform-paste)");
+  await composer.fill("");
+  record("platform.chat.rich-paste", { service: "mocked-service", input: "synthetic ClipboardEvent with text/html + text/plain", assertions: "real textarea onPaste converts matching HTML link into Markdown without navigating or touching the system clipboard" });
 }
 
 /**
@@ -269,9 +517,10 @@ async function checkSystemPanels(page, { agentCommands, artifacts, record }) {
   await page.mouse.wheel(0, 500);
   await page.waitForFunction(() => document.querySelector(".system-prompt-scroll")?.scrollTop > 30);
   await capture(page, artifacts, "system-prompt");
-  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "System prompt", exact: true }).click();
   await prompt.waitFor({ state: "hidden" });
-  record("platform.system-prompt", { service: "mocked-service", assertions: "System prompt toolbar -> get_state; rendered prompt; bounded real wheel scroller; Escape close" });
+  assert.equal(await page.getByRole("button", { name: "System prompt", exact: true }).getAttribute("aria-pressed"), "false");
+  record("platform.system-prompt", { service: "mocked-service", assertions: "System prompt toolbar -> get_state; rendered prompt; bounded real wheel scroller; toolbar toggle closes and clears aria-pressed" });
   const previousTools = agentCommands.filter((command) => command.type === "get_tools").length;
   await page.getByRole("button", { name: "Tool definitions", exact: true }).click();
   const tools = page.locator(".tool-definitions-panel");
@@ -284,9 +533,10 @@ async function checkSystemPanels(page, { agentCommands, artifacts, record }) {
   await tools.getByText("Fixture directory parameter", { exact: true }).waitFor();
   await waitEvidence(() => agentCommands.filter((command) => command.type === "get_tools").length > previousTools, "Opening Tool definitions must send a fresh get_tools command");
   await capture(page, artifacts, "tool-definitions");
-  await page.keyboard.press("Escape");
+  await page.getByRole("button", { name: "Tool definitions", exact: true }).click();
   await tools.waitFor({ state: "hidden" });
-  record("platform.tool-definitions", { service: "mocked-service", assertions: "toolbar -> get_tools; active definitions; selectable tools; schema parameter description; Escape close" });
+  assert.equal(await page.getByRole("button", { name: "Tool definitions", exact: true }).getAttribute("aria-pressed"), "false");
+  record("platform.tool-definitions", { service: "mocked-service", assertions: "toolbar -> get_tools; active definitions; selectable tools; schema parameter description; toolbar toggle closes and clears aria-pressed" });
 }
 
 /**
@@ -377,14 +627,29 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
   const agentCommands = [];
   const contextRequests = [];
   const childAgentRequests = [];
-  const events = await createEventService(project);
+  const uploadRequests = [];
+  const events = await createEventService(project, state);
+  const chat = createChatService(snapshot, state, events);
   const appOrigin = new URL(base).origin;
-  const matcher = (url) => url.origin === appOrigin && (url.pathname.startsWith("/api/terminal") || url.pathname.startsWith(`/api/agent/${sessionId}`) || url.pathname.startsWith(`/api/agent/${childId}`) || url.pathname.startsWith(`/api/sessions/${sessionId}`) || url.pathname.startsWith(`/api/sessions/${childId}`));
+  const uploadPath = `/api/files/${project.replace(/\\/g, "/").split("/").filter(Boolean).map(encodeURIComponent).join("/")}`;
+  const matcher = (url) => url.origin === appOrigin && (url.pathname.startsWith("/api/terminal") || url.pathname.startsWith(`/api/agent/${sessionId}`) || url.pathname.startsWith(`/api/agent/${childId}`) || url.pathname.startsWith(`/api/sessions/${sessionId}`) || url.pathname.startsWith(`/api/sessions/${childId}`) || url.pathname.startsWith("/api/files/") && url.searchParams.get("type") === "upload");
   const handler = async (route) => {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
     const method = request.method();
+    if (path.startsWith("/api/files/") && url.searchParams.get("type") === "upload") {
+      assert.equal(path, uploadPath, "Composer uploads only to the fixture cwd");
+      assert.equal(method, "POST");
+      assert.equal(url.searchParams.get("conflict"), "skip", "Composer uploads must not replace an existing file");
+      assert.match(request.headers()["content-type"], /^multipart\/form-data; boundary=/);
+      const body = request.postDataBuffer().toString("utf8");
+      assert.ok(body.includes('name="files"; filename="platform-upload.txt"'));
+      assert.ok(body.includes("PLATFORM_UPLOAD_BYTES"));
+      assert.equal(body.includes("platform-image.png"), false, "Images attach to the prompt rather than the file upload");
+      uploadRequests.push({ path, conflict: "skip", name: "platform-upload.txt", bytes: "PLATFORM_UPLOAD_BYTES" });
+      return route.fulfill({ json: { uploaded: ["platform-upload.txt"], skipped: [], errors: [] } });
+    }
     if (path.startsWith(`/api/agent/${childId}`)) {
       childAgentRequests.push(path);
       return route.fulfill({ status: 400, json: { error: "Viewer must not start a child AgentSession" } });
@@ -408,7 +673,23 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
       if (body.type === "get_state") return route.fulfill({ json: { success: true, data: state } });
       if (body.type === "get_tools") return route.fulfill({ json: { success: true, data: tools } });
       if (body.type === "get_commands") return route.fulfill({ json: { success: true, data: { commands: [{ name: "platform-dialog", description: "Mocked platform extension", source: "extension" }] } } });
+      if (body.type === "abort") {
+        chat.finish(true);
+        return route.fulfill({ json: { success: true, data: null } });
+      }
+      if (body.type === "compact") {
+        chat.beginCompact(route);
+        return;
+      }
+      if (body.type === "abort_compaction") {
+        await chat.finishCompact(true);
+        return route.fulfill({ json: { success: true, data: null } });
+      }
       if (body.type === "prompt") {
+        if (["PLATFORM_CHAT_COMPLETE", "PLATFORM_CHAT_STOP", "PLATFORM_CHAT_IMAGE"].includes(body.message)) {
+          chat.begin(body);
+          return route.fulfill({ json: { success: true, data: null } });
+        }
         assert.match(body.message, /^\/platform-dialog (select|confirm|input|editor|custom)$/);
         const method = body.message.split(" ")[1];
         await route.fulfill({ json: { success: true, data: null } });
@@ -455,6 +736,9 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
     await checkTerminal(page, { project, terminalRequests, artifacts, record });
     await checkSubagent(page, { childId, contextRequests, childAgentRequests, artifacts, record });
     await checkExtensions(page, { events, agentCommands, artifacts, record });
+    await checkChatLifecycle(page, { chat, events, agentCommands, artifacts, record });
+    await checkChatCompaction(page, { chat, agentCommands, artifacts, record });
+    await checkChatAttachments(page, { chat, agentCommands, uploadRequests, artifacts, record });
     // 登出使用隔离服务真实 cookie，补上与受控登录 UI 不同的服务集成路径。
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });
@@ -483,6 +767,7 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
       if (saved.terminalTabs === null) sessionStorage.removeItem("pi-web:terminal-tabs");
       else sessionStorage.setItem("pi-web:terminal-tabs", saved.terminalTabs);
     }, storage).catch(() => {});
+    await chat.close();
     await page.goto("about:blank").catch(() => {});
     try {
       await page.unroute(matcher, handler);

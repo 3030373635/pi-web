@@ -9,10 +9,16 @@ import { join } from "node:path";
  * @param {string} method 预期 HTTP 方法。
  * @param {() => Promise<unknown>} action 触发请求的真实界面操作。
  * @param {number} status 预期响应状态，失败重试场景显式指定非 200。
+ * @param {string | undefined} commandType RPC 请求体的 type；同一路径可能同时有后台命令，等待 RPC 时必须指定。
  */
-async function requestFromAction(page, path, method, action, status = 200) {
+async function requestFromAction(page, path, method, action, status = 200, commandType) {
+  if (path.startsWith("/api/agent/") && method === "POST") {
+    assert.equal(typeof commandType, "string", "RPC waits must identify the expected command type");
+  }
   const responsePromise = page.waitForResponse((response) =>
-    new URL(response.url()).pathname === path && response.request().method() === method);
+    new URL(response.url()).pathname === path && response.request().method() === method
+      // get_tools 等后台命令与 reload 共用路径，必须先按请求载荷筛选再等待响应。
+      && (commandType === undefined || response.request().postDataJSON()?.type === commandType));
   await action();
   const response = await responsePromise;
   assert.equal(response.status(), status, `${method} ${path} must return the expected status`);
@@ -98,6 +104,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
   const oauthUrl = `http://127.0.0.1:${oauthServer.address().port}/oauth`;
   let trust = { requiresTrust: true, trusted: false, decision: false, inherited: false };
   let defaultModel = { provider: "openai-codex", modelId: "gpt-fixture" };
+  let defaultThinkingLevel = null;
   const enabledModels = new Map([["openai-codex/gpt-fixture", true], ["openai-codex/gpt-fixture-second", true], ["relay/relay-original", true]]);
   let config = { providers: { relay: { baseUrl: "https://relay.example.invalid/v1", api: "openai-completions", models: [{ id: "relay-original", name: "Relay original" }] } } };
   let keyConfigured = false;
@@ -111,7 +118,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
   const skillPath = join(project, "fixtures", "chrome-settings", "SKILL.md");
   const secondSkillPath = join(project, "fixtures", "chrome-settings-secondary", "SKILL.md");
   const skills = [
-    { name: "chrome-fixture", description: "Fixture skill instructions", filePath: skillPath, baseDir: join(project, "fixtures", "chrome-settings"), disableModelInvocation: false, sourceInfo: { source: "user", scope: "user" } },
+    { name: "chrome-fixture", description: "Fixture skill instructions", filePath: skillPath, baseDir: join(project, "fixtures", "chrome-settings"), disableModelInvocation: false, sourceInfo: { source: "user", scope: "user" }, install: { package: "fixture/chrome-skills@compat", scope: "global", source: "fixture/chrome-skills", versionHash: "11111111", canCheckForUpdates: true } },
     { name: "chrome-fixture-secondary", description: "Second fixture skill", filePath: secondSkillPath, baseDir: join(project, "fixtures", "chrome-settings-secondary"), disableModelInvocation: false, sourceInfo: { source: "user", scope: "user" } },
   ];
   const mcpPath = join(project, "fixtures", "mcp.json");
@@ -128,7 +135,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
 
   /** 记录已完成的实际动作；id 是稳定覆盖标识，actions 描述真实交互。 */
   function verified(id, actions) {
-    const browserLocal = id === "settings.general.appearance-persistence" || id === "settings.general.language";
+    const browserLocal = id === "settings.general.appearance-persistence" || id === "settings.general.language" || id === "settings.general.cross-tab-font-sync";
     const item = { mode: browserLocal ? "browser-local" : "mocked-service", service: browserLocal ? "real localStorage and browser rendering" : "controlled API fixtures; real browser components", actions };
     evidence.push({ id, ...item });
     record(id, item);
@@ -178,7 +185,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
   /** 精确匹配本文件接管的 API；url 是 Playwright 传入的请求地址。 */
   function matchesFixture(url) {
     return url.pathname === `/api/agent/${encodeURIComponent(sessionId)}`
-      || /^\/api\/(?:tools\/settings|project-trust|cache-miss-notices|models-config(?:\/(?:discover|test|catalog))?|auth\/(?:providers|api-key\/fixture-key|login\/fixture-oauth)|models(?:\/(?:enabled|default))?|provider-usage\/query|skills(?:\/(?:content|search|install))?|subagents\/(?:settings|profiles)|plugins(?:\/check)?|mcp(?:\/(?:test|sign-in(?:\/fixture-flow)?))?)$/.test(url.pathname);
+      || /^\/api\/(?:tools\/settings|project-trust|cache-miss-notices|models-config(?:\/(?:discover|test|catalog))?|auth\/(?:providers|api-key\/fixture-key|login\/fixture-oauth)|models(?:\/(?:enabled|default))?|provider-usage\/query|skills(?:\/(?:content|search|install|check|update))?|subagents\/(?:settings|profiles)|plugins(?:\/check)?|mcp(?:\/(?:test|sign-in(?:\/fixture-flow)?))?)$/.test(url.pathname);
   }
 
   /** 拦截独立服务边界；route 参数提供真实浏览器请求，界面和 React 均保持原实现。 */
@@ -236,14 +243,15 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
       }
       json = enabledModelsOverview();
     } else if (path === "/api/models/default") {
-      defaultModel = { provider: body.provider, modelId: body.modelId };
+      if ("thinkingLevel" in body) defaultThinkingLevel = body.thinkingLevel;
+      else defaultModel = { provider: body.provider, modelId: body.modelId };
       json = { success: true };
     } else if (path === "/api/models") {
       json = {
         models: { "openai-codex:gpt-fixture": "GPT Fixture", "openai-codex:gpt-fixture-second": "GPT Fixture Second" },
         modelList: [{ provider: "openai-codex", id: "gpt-fixture", name: "GPT Fixture", input: ["text"] }, { provider: "openai-codex", id: "gpt-fixture-second", name: "GPT Fixture Second", input: ["text"] }],
         defaultModel,
-        defaultThinkingLevel: null, savedDefaultThinkingLevel: null,
+        defaultThinkingLevel, savedDefaultThinkingLevel: defaultThinkingLevel,
         thinkingLevels: { "openai-codex:gpt-fixture": ["off", "low", "medium", "high"], "openai-codex:gpt-fixture-second": ["off", "low", "medium", "high"] },
         thinkingLevelMaps: {}, thinkingLevelPins: {},
       };
@@ -261,6 +269,11 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
       json = { results: [{ package: "fixture/chrome-skills@compat", installs: "42", url: "https://skills.example.invalid/compat" }] };
     } else if (path === "/api/skills/install") {
       json = { success: true };
+    } else if (path === "/api/skills/check") {
+      json = { updates: [{ package: "fixture/chrome-skills@compat", scope: "global", state: "update-available", currentVersion: skills[0].install.versionHash, latestVersion: "22222222" }] };
+    } else if (path === "/api/skills/update") {
+      skills[0].install.versionHash = "22222222";
+      json = { success: true, skill: skills[0] };
     } else if (path === "/api/subagents/settings") {
       if (method === "PUT") subagentSettings = { ...subagentSettings, ...body };
       json = subagentSettings;
@@ -283,6 +296,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
           if (body.action === "disable") Object.assign(item, { disabled: true, status: "disabled" });
         }
         if (body.action === "update" && pkg) pkg.version = "1.1.0";
+        if (body.action === "update" && !body.source) for (const item of packages) item.version = "1.2.0";
         if (body.action === "remove") packages = packages.filter((item) => item.source !== body.source);
       }
       json = pluginsOverview();
@@ -385,6 +399,24 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     assert.equal(await general.getByRole("radio", { name: "Dark", exact: true }).isChecked(), true);
     await page.screenshot({ path: join(artifacts, `${browserMajor}-settings-general-functional.png`) });
     verified("settings.general.appearance-persistence", "Edited interface/monospace fonts and weights, keyboard-adjusted width/size sliders, changed send key/file placement/theme, asserted stored and applied values, then reloaded and verified all selected controls persisted.");
+    const sibling = await page.context().newPage();
+    try {
+      await sibling.goto(`${base}/?session=${encodeURIComponent(sessionId)}`, { waitUntil: "domcontentloaded" });
+      await sibling.locator(".chat-input-textarea").waitFor();
+      await uiFont.fill("monospace");
+      const uiWeight = general.getByRole("slider", { name: "Interface font weight", exact: true });
+      await uiWeight.press("Home");
+      await uiWeight.press("ArrowRight");
+      await uiWeight.press("ArrowRight");
+      await sibling.waitForFunction(() => getComputedStyle(document.body).fontFamily.startsWith("monospace,") && getComputedStyle(document.body).fontWeight === "300");
+      assert.deepEqual(await sibling.evaluate(() => ({ family: localStorage.getItem("pi-ui-font-family"), weight: localStorage.getItem("pi-ui-font-weight") })), { family: "monospace", weight: "300" });
+      await uiFont.fill("serif");
+      await uiWeight.press("End");
+      await sibling.waitForFunction(() => getComputedStyle(document.body).fontFamily.startsWith("serif,") && getComputedStyle(document.body).fontWeight === "600");
+      verified("settings.general.cross-tab-font-sync", "Opened a second real application tab, edited font family/weight in Settings and verified storage-event updates in the sibling's computed styles and localStorage, then restored both values.");
+    } finally {
+      await sibling.close();
+    }
     await general.getByRole("radio", { name: /^简体中文/ }).click();
     assert.equal(await page.evaluate(() => localStorage.getItem("pi-locale")), "zh-CN");
     await settings.locator(".settings-dialog-title").filter({ hasText: /^设置$/ }).waitFor();
@@ -397,11 +429,11 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     await general.locator('[role="switch"][aria-label="Show cache and cost notices"][aria-checked="true"]').waitFor();
     assert.equal(await general.getByRole("switch", { name: "Show cache and cost notices", exact: true }).getAttribute("aria-checked"), "true");
     verified("settings.general.cache-notices", "Saved cache/cost notices through its real server-backed switch and asserted the exact enabled mutation and checked state.");
-    const powerShellReload = page.waitForResponse((response) => new URL(response.url()).pathname === `/api/agent/${encodeURIComponent(sessionId)}` && response.request().method() === "POST");
-    const powerShellSave = await requestFromAction(page, "/api/tools/settings", "PUT", () => general.getByRole("switch", { name: "Use PowerShell instead of Bash", exact: true }).click());
-    assert.deepEqual(powerShellSave, { enabled: true });
-    const powerShellReloadResponse = await powerShellReload;
-    assert.deepEqual(powerShellReloadResponse.request().postDataJSON(), { type: "reload" });
+    const powerShellReload = await requestFromAction(page, `/api/agent/${encodeURIComponent(sessionId)}`, "POST", async () => {
+      const powerShellSave = await requestFromAction(page, "/api/tools/settings", "PUT", () => general.getByRole("switch", { name: "Use PowerShell instead of Bash", exact: true }).click());
+      assert.deepEqual(powerShellSave, { enabled: true });
+    }, 200, "reload");
+    assert.deepEqual(powerShellReload, { type: "reload" });
     await general.locator('[role="switch"][aria-label="Use PowerShell instead of Bash"][aria-checked="true"]').waitFor();
     verified("settings.general.powershell", "Saved the Windows PowerShell option, asserted enabled:true and the ensuing session reload command, then verified its checked state; the process reload was mocked.");
     await general.getByRole("button", { name: "Reset interface font", exact: true }).click();
@@ -459,6 +491,37 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     assert.deepEqual(modelSave.providers["chrome-provider"].models[0], { id: "chrome-model", name: "Chrome model", contextWindow: 256000, maxTokens: 8192 });
     await footer.getByRole("button", { name: "Saved", exact: true }).waitFor();
     verified("settings.models.custom-save", "Created and renamed a provider, added a model, edited token limits and asserted the exact saved model JSON.");
+
+    await detail.getByRole("button", { name: "Edit prices", exact: true }).click();
+    await fieldControl(detail, "Input").fill("1.25");
+    await fieldControl(detail, "Output").fill("2.5");
+    await fieldControl(detail, "Cache read").fill("0.25");
+    await fieldControl(detail, "Cache write").fill("0.5");
+    await detail.getByRole("button", { name: "Done", exact: true }).click();
+    await detail.getByRole("checkbox", { name: "Reasoning / thinking", exact: true }).check();
+    await detail.getByRole("checkbox", { name: "Image input", exact: true }).check();
+    await detail.getByRole("button", { name: /^Advanced settings/ }).click();
+    const advanced = detail.locator("#model-advanced-settings");
+    await fieldControl(advanced, "Base URL override").fill("https://model.example.invalid/v1");
+    await fieldControl(advanced, "API override", "select").selectOption("openai-responses");
+    await advanced.getByRole("button", { name: "+ Add header", exact: true }).click();
+    await advanced.getByPlaceholder("Header-Name", { exact: true }).fill("X-Chrome-Test");
+    await advanced.getByPlaceholder("value", { exact: true }).fill("fixture-header-value");
+    await fieldControl(advanced, "Image size limit (bytes)").fill("4194304");
+    await advanced.getByRole("checkbox", { name: "DeepSeek thinking compatibility", exact: true }).check();
+    await advanced.getByRole("checkbox", { name: "Use the developer role for the system prompt", exact: true }).uncheck();
+    const advancedSave = await requestFromAction(page, "/api/models-config", "PUT", () => footer.getByRole("button", { name: "Save", exact: true }).click());
+    const advancedModel = advancedSave.providers["chrome-provider"].models[0];
+    assert.deepEqual(advancedModel.cost, { input: 1.25, output: 2.5, cacheRead: 0.25, cacheWrite: 0.5 });
+    assert.equal(advancedModel.baseUrl, "https://model.example.invalid/v1");
+    assert.equal(advancedModel.api, "openai-responses");
+    assert.deepEqual(advancedModel.headers, { "X-Chrome-Test": "fixture-header-value" });
+    assert.deepEqual(advancedModel.input, ["text", "image"]);
+    assert.equal(advancedModel.reasoning, true);
+    assert.deepEqual(advancedModel.inputLimits, { images: { resize: { maxBytes: 4194304 } } });
+    assert.deepEqual(advancedModel.compat, { thinkingFormat: "deepseek", requiresReasoningContentOnAssistantMessages: true, supportsDeveloperRole: false });
+    await footer.getByRole("button", { name: "Saved", exact: true }).waitFor();
+    verified("settings.models.advanced-editor", "Edited all four prices, capabilities, model URL/API/header overrides, image byte limit and compatibility flags through real controls; asserted their exact saved model fields.");
 
     const testRequest = await requestFromAction(page, "/api/models-config/test", "POST", () => detail.getByRole("button", { name: "Test", exact: true }).click());
     assert.equal(testRequest.providerName, "chrome-provider");
@@ -529,6 +592,15 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     await detail.getByRole("button", { name: "Back", exact: true }).click();
     await detail.getByText("Chrome skill contents.", { exact: true }).waitFor();
     verified("settings.skills.detail-navigation", "Loaded real rendered skill Markdown, opened its reference document and used Back to restore the root instructions.");
+    const skillVersionCheck = await requestFromAction(page, "/api/skills/check", "POST", () => detail.getByRole("button", { name: "Check", exact: true }).click());
+    assert.deepEqual(skillVersionCheck, { cwd: project, package: "fixture/chrome-skills@compat", scope: "global" });
+    await detail.getByText("22222222", { exact: true }).waitFor();
+    const skillUpdate = await requestFromAction(page, "/api/skills/update", "POST", () => detail.getByRole("button", { name: "Update", exact: true }).click());
+    assert.deepEqual(skillUpdate, { cwd: project, package: "fixture/chrome-skills@compat", scope: "global" });
+    await detail.getByText("Up to date", { exact: true }).waitFor();
+    await detail.getByText("22222222", { exact: true }).waitFor();
+    assert.equal(skills[0].install.versionHash, "22222222");
+    verified("settings.skills.version-update", "Checked the installed skill version, applied its offered update and verified Up to date plus the new version hash; asserted exact package/scope/cwd requests and mocked the installer.");
     const toggle = await requestFromAction(page, "/api/skills", "PATCH", () => detail.getByRole("switch", { name: "Visible in model prompt — click to disable", exact: true }).click());
     assert.deepEqual(toggle, { filePath: skillPath, disableModelInvocation: true });
     await detail.getByRole("switch", { name: "Hidden from model prompt — click to enable", exact: true }).waitFor();
@@ -590,7 +662,7 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     assert.deepEqual(concurrencySave, { maxConcurrent: 6 });
     assert.deepEqual(subagentSettings, { enabled: true, maxConcurrent: 6 });
     assert.equal(await concurrent.inputValue(), "6");
-    const agentsReload = await requestFromAction(page, `/api/agent/${encodeURIComponent(sessionId)}`, "POST", () => agentFeature.getByRole("button", { name: "Reload session", exact: true }).click());
+    const agentsReload = await requestFromAction(page, `/api/agent/${encodeURIComponent(sessionId)}`, "POST", () => agentFeature.getByRole("button", { name: "Reload session", exact: true }).click(), 200, "reload");
     assert.deepEqual(agentsReload, { type: "reload" });
     await agentFeature.getByText("Reload the current session to apply this change.", { exact: true }).waitFor({ state: "hidden" });
     verified("settings.agents.feature-concurrency", "Toggled built-in sub-agents off/on, blur-saved concurrent prompts and pressed Reload session; asserted exact feature/concurrency/reload writes and cleared reload notice.");
@@ -626,6 +698,13 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     assert.deepEqual(pluginUpdate, { action: "update", source: "npm:chrome-plugin", scope: "global", cwd: project });
     await detail.getByText("installed 1.1.0", { exact: false }).waitFor();
     verified("settings.plugins.check-update", "Checked one package for updates, applied its offered update and asserted the saved source and displayed installed version.");
+    const pluginCheckAll = await requestFromAction(page, "/api/plugins/check", "POST", () => footer.getByRole("button", { name: "Check updates", exact: true }).click());
+    assert.deepEqual(pluginCheckAll, { cwd: project });
+    const pluginUpdateAll = await requestFromAction(page, "/api/plugins", "POST", () => footer.getByRole("button", { name: "Update all (1)", exact: true }).click());
+    assert.deepEqual(pluginUpdateAll, { action: "update", cwd: project });
+    await detail.getByText("installed 1.2.0", { exact: false }).waitFor();
+    await footer.getByRole("button", { name: "Check updates", exact: true }).waitFor();
+    verified("settings.plugins.update-all", "Checked all installed plugins from the footer and applied Update all; asserted the unscoped update-all request and verified its installed version plus cleared update action.");
     const pluginRemove = await requestFromAction(page, "/api/plugins", "POST", () => detail.getByRole("button", { name: "Remove", exact: true }).click());
     assert.deepEqual(pluginRemove, { action: "remove", source: "npm:chrome-plugin", scope: "global", cwd: project });
     await detail.getByPlaceholder("npm:@scope/package", { exact: true }).waitFor();
@@ -731,13 +810,23 @@ export async function checkFullSiteSettings(page, { base, project, artifacts, se
     await modelMenu.getByRole("option").filter({ hasText: "GPT Fixture Second" }).locator("..").getByRole("img", { name: "Default model for new chats", exact: true }).waitFor();
     await page.keyboard.press("Escape");
     verified("settings.models.default-star", "Saved a different default model from the fresh composer's real star control, asserted provider/model/cwd and verified its selected label and filled default marker without prompting an agent.");
+    const reasoningTrigger = page.getByRole("button", { name: "Change reasoning level", exact: true });
+    await reasoningTrigger.click();
+    const highReasoning = page.getByRole("option", { name: /^high\s*High reasoning$/ });
+    await highReasoning.hover();
+    const reasoningSave = await requestFromAction(page, "/api/models/default", "PUT", () => highReasoning.locator("..").getByRole("button", { name: "Use and save as default reasoning level", exact: true }).click());
+    assert.deepEqual(reasoningSave, { cwd: project, thinkingLevel: "high" });
+    await reasoningTrigger.filter({ hasText: "high" }).waitFor();
+    await reasoningTrigger.click();
+    await page.getByRole("option", { name: /^high\s*High reasoning$/ }).locator("..").getByRole("img", { name: "Default reasoning level for new chats", exact: true }).waitFor();
+    await page.keyboard.press("Escape");
+    verified("settings.models.default-reasoning-star", "Saved high as the default reasoning level through the real reasoning star, asserted thinkingLevel/cwd and verified the selected trigger and filled default marker.");
     return { mode: "mocked-service", coverage: evidence, uncovered: [
       "Real external model requests, OAuth token exchange and package/skill installation are intentionally replaced by controlled service fixtures",
       "System push permission/notification delivery is not requested; PowerShell process execution and web-password cookie invalidation/logout navigation remain server/platform boundaries",
-      "Advanced model cost/compatibility/header editors, catalog-price autofill and default reasoning stars are not exercised",
-      "Skill version update and plugin update-all are not exercised; individual plugin check/update is covered",
+      "Model catalog-price autofill and exhaustive custom compatibility-map edits are not exercised; advanced prices/headers/capabilities and default reasoning are covered",
       "Malformed project trust store, inherited trust and fresh-folder trust-and-add refusal combinations are not exercised",
-      "Cross-tab preference synchronization and exhaustive service timeout/partial-bulk-failure combinations are not exercised",
+      "Exhaustive service timeout/partial-bulk-failure combinations are not exercised; real cross-tab font family/weight synchronization is covered",
     ] };
   } finally {
     // 先卸载组件以关闭 EventSource 和轮询，再只移除本测试注册的 handler。

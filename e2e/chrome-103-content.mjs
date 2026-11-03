@@ -541,6 +541,8 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     record("content.svg", "real-session: decoded SVG image; source/preview round trip; native dialog zoom in/out/reset/Escape");
 
     const mermaid = answer.locator(".markdown-code-block").filter({ has: page.locator(".markdown-code-lang", { hasText: /^mermaid$/ }) });
+    // MarkdownBody 显式启用 defaultPreview，先通过实际控件切到源码才有 pre。
+    await mermaid.getByTitle("Show Mermaid source", { exact: true }).click();
     assert.match(await mermaid.locator("pre").innerText(), /https:\/\/example.invalid\/chrome103/);
     await mermaid.getByTitle("Preview Mermaid diagram", { exact: true }).click();
     const graph = mermaid.locator(".mermaid-preview-button svg");

@@ -18,6 +18,8 @@
       }
 
       body {
+        /* 独立离线文档不加载应用兼容层，旧 Chromium 使用 vh 回退。 */
+        min-height: 100vh;
         min-height: 100dvh;
         margin: 0;
         display: grid;

@@ -51,6 +51,9 @@ export async function checkProjectNavigation({ browser, base, artifacts, fixture
         viewport: mobile ? { width: 390, height: 844 } : { width: 1280, height: 800 },
         locale: "en-US", hasTouch: mobile, isMobile: mobile,
       });
+      // 新标签事件属于 context；只设置 page 超时不能限制 waitForEvent("page")。
+      context.setDefaultTimeout(30_000);
+      context.setDefaultNavigationTimeout(90_000);
       await context.tracing.start({ screenshots: true, snapshots: true });
       const errors = [];
       const forbidden = [];
