@@ -7,6 +7,23 @@ import { join } from "node:path";
 
 const FORBIDDEN_COMMANDS = new Set(["prompt", "steer", "follow_up", "fork", "fork_branch", "clone", "new_session"]);
 
+/**
+ * 限制底层 CDP 命令等待；Playwright 的 page timeout 不会覆盖这些浏览器级请求。
+ * @param {Promise<unknown>} operation 已发出的浏览器协议操作。
+ * @param {string} label 超时时公开报告的具体阶段。
+ * @returns {Promise<unknown>} 原操作的结果，不改变正常协议行为。
+ */
+async function boundedProtocolStep(operation, label) {
+  let timer;
+  try {
+    return await Promise.race([operation, new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`Navigation protocol timed out: ${label}`)), 30_000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 export async function checkSessionNavigation({ browser, base, artifacts, a, b, api, deleteSession }) {
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
   await context.tracing.start({ screenshots: true, snapshots: true });
@@ -62,13 +79,15 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
   // (no "page" event within 30 s) although the tab loaded and ran. The opened
   // URL is taken from the target, that tab is closed, and a page of this
   // context loads the same URL.
-  const browserSession = await browser.newBrowserCDPSession();
-  await browserSession.send("Target.setDiscoverTargets", { discover: true });
-  const pageSession = await context.newCDPSession(page);
-  const { browserContextId } = (await pageSession.send("Target.getTargetInfo")).targetInfo;
-  await pageSession.detach();
+  console.log("::notice title=Navigation setup::Session fixtures loaded; connecting browser protocol");
+  const browserSession = await boundedProtocolStep(browser.newBrowserCDPSession(), "attach browser session");
+  await boundedProtocolStep(browserSession.send("Target.setDiscoverTargets", { discover: true }), "discover targets");
+  const pageSession = await boundedProtocolStep(context.newCDPSession(page), "attach page session");
+  const { browserContextId } = (await boundedProtocolStep(pageSession.send("Target.getTargetInfo"), "get page target info")).targetInfo;
+  await boundedProtocolStep(pageSession.detach(), "detach setup page session");
+  console.log("::notice title=Navigation setup::Browser target discovery initialized");
   const newTab = async (open) => {
-    const known = new Set((await browserSession.send("Target.getTargets")).targetInfos.map((info) => info.targetId));
+    const known = new Set((await boundedProtocolStep(browserSession.send("Target.getTargets"), "list targets before click")).targetInfos.map((info) => info.targetId));
     let onTarget;
     let timer;
     const opened = new Promise((resolve, reject) => {
@@ -92,7 +111,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
       browserSession.off("Target.targetCreated", onTarget);
       browserSession.off("Target.targetInfoChanged", onTarget);
     }
-    await browserSession.send("Target.closeTarget", { targetId: target.targetId });
+    await boundedProtocolStep(browserSession.send("Target.closeTarget", { targetId: target.targetId }), "close discovered browser tab");
     const tab = await context.newPage();
     watch(tab);
     // A cold tab under `next dev` may wait on a compile.
@@ -268,7 +287,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await context.tracing.stop({ path: join(artifacts, "session-navigation-trace.zip") }).catch(() => {});
     throw error;
   } finally {
-    await browserSession.detach().catch(() => {});
+    await boundedProtocolStep(browserSession.detach(), "detach browser session").catch(() => {});
     await context.close();
   }
 }

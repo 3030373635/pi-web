@@ -519,15 +519,15 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     await math.getByRole("button", { name: "Copied", exact: true }).waitFor();
     record("content.markdown", "real-session: strong/table/inline+display KaTeX rendered; JavaScript and display-math copy report success; clipboard bytes not inspected");
 
-    const process = page.getByRole("button", { name: /^Process details/ });
-    if (await process.getAttribute("aria-expanded") !== "true") await process.click();
+    const processDetails = page.getByRole("button", { name: /^Process details/ });
+    if (await processDetails.getAttribute("aria-expanded") !== "true") await processDetails.click();
     const thinking = page.getByRole("button", { name: /^Thinking/ });
     if (await thinking.getAttribute("aria-expanded") !== "true") await thinking.click();
     await page.getByText("Reasoning details remain readable in the old browser.", { exact: false }).waitFor();
     await page.getByRole("button", { name: /bash.*echo Chrome103 tool output/ }).click();
     await page.getByText("Chrome103 tool output", { exact: true }).waitFor();
     await thinking.click();
-    await process.click();
+    await processDetails.click();
     assert.equal(await thinking.count(), 0);
     record("content.process", "real-session: opened process details, expanded deferred thinking and bash result, verified their text, collapsed both");
 

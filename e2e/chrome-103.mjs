@@ -48,6 +48,12 @@ const fixtures = suite === "content" ? prepareFullSiteContent({ project, session
 const reports = [];
 let currentPhase = "server-start";
 let browserErrors = [];
+// route 回调等异步异常不一定进入下方 try/catch；只记录，不改变 Node 的失败退出行为。
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  const details = `${currentPhase}\n${origin}\n${error.stack || error}`
+    .replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  console.error(`::error title=Unhandled Windows browser failure::${details}`);
+});
 
 /**
  * 保存已执行证据，即使后续页面失败也不丢失覆盖边界。
