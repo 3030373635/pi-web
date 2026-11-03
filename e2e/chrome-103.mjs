@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { once } from "node:events";
 import { createWriteStream, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
@@ -198,7 +198,8 @@ try {
     await page.screenshot({ path: join(artifacts, `${target.name}-debug.png`) });
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Open another project…", exact: true }).click();
-    await page.getByRole("menuitem", { name: "Open another project…", exact: true }).click();
+    // 桌面项目菜单把这一项称为 Custom path；手机底部菜单才显示 Open another project。
+    await page.getByRole("menuitem", { name: "Custom path…", exact: true }).click();
     const directory = page.getByRole("dialog", { name: "Select directory", exact: true });
     await assertReachable(directory.getByRole("button", { name: "Close", exact: true }));
     assert.ok((await directory.locator(".directory-picker-panel").boundingBox()).height <= 500, "Directory picker fits the viewport");
@@ -262,20 +263,33 @@ try {
     await browser.close();
     browser = context = page = null;
     console.log(`PASS Windows Chromium ${version}: original regression, transcript, input, sidebar, files, all settings, themes and reload`);
+    console.log(`::notice title=${mode} browser passed::Chromium ${version}: all compatibility checks passed`);
   }
   writeFileSync(join(artifacts, "versions.json"), JSON.stringify(versions, null, 2));
 } catch (error) {
   // 将实际错误写入 Actions annotation，公开运行页也可直接定位失败，无需读取凭据。
-  const details = String(error.stack || error).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+  const surfaces = await page?.locator('[role="menu"]:visible, [role="dialog"]:visible').allTextContents().catch(() => []);
+  const message = `${error.stack || error}\nVisible dialogs/menus: ${surfaces?.join(" | ").slice(0, 2000) || "none"}`;
+  const details = message.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
   console.error(`::error title=Windows browser regression::${details}`);
   await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {});
   await context?.tracing.stop({ path: join(artifacts, "failure-trace.zip") }).catch(() => {});
   throw error;
 } finally {
   await browser?.close();
-  if (server && server.exitCode === null) {
+  if (server?.pid && server.exitCode === null && server.signalCode === null) {
     const exited = once(server, "exit");
-    server.kill();
+    if (process.platform === "win32") {
+      // next dev 会 fork 服务进程；Windows 的 kill(SIGTERM) 不会回收子进程树。
+      // 只清理本次测试启动的 PID 树，避免遗留进程持有夹具及 stdout 导致 CI 挂起。
+      try {
+        execFileSync("taskkill", ["/PID", String(server.pid), "/T", "/F"], { stdio: "ignore" });
+      } catch {
+        server.kill();
+      }
+    } else {
+      server.kill();
+    }
     await exited;
   }
   serverLog.end();
