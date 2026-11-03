@@ -9,6 +9,15 @@ sections, themes, short-window settings scrolling, draft retention and reload.
 Artifacts are saved in `test-results/chrome-103/`. See
 `compat/chrome-103/README.md` for limitations and upstream upgrade instructions.
 
+Full-site coverage uses `E2E_SUITE=core|settings|content|platform|navigation`.
+Every suite runs on Windows in both browsers and both `start`/`dev` modes.
+The manifest `chrome-103-cases.json` is the reviewable case inventory; the final
+coverage job fails unless all 20 reports and all advertised case IDs pass.
+Each report includes actual action evidence and service/platform boundaries.
+The platform suite enables an isolated synthetic web password for real login
+and logout routes. Content runs headed, with native PDF observation enabled by
+`CHROME_103_NATIVE_PDF=1`; media fixture coverage is PCM WAV and VP8 WebM.
+
 Adapted from @Nuctori's CI/E2E proposal in #617 and #599. The performance
 scanner, reverse reader, sidebar changes, and timing benchmarks are not included.
 

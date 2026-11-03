@@ -25,10 +25,9 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  compatibility:
-    # GitHub 没有 Windows 10 托管机；在 Server 2022 上运行真实 103 内核。
+  build:
     runs-on: windows-2022
-    timeout-minutes: 35
+    timeout-minutes: 25
     env:
       NEXT_TELEMETRY_DISABLED: "1"
     steps:
@@ -37,44 +36,101 @@ jobs:
         with:
           node-version: 22.19.0
           cache: npm
-      - name: Install dependencies
-        run: npm ci
-      - name: Lint and typecheck
-        shell: pwsh
-        run: |
-          npm run lint
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          npx tsc --noEmit
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - run: npm ci
+      - name: Lint
+        run: node e2e/chrome-103-checks.mjs lint
+      - name: Typecheck
+        run: node e2e/chrome-103-checks.mjs types
       - name: Test compatibility transforms, APIs and Windows packaging
-        run: node --test lib/chrome-103-compat.test.mjs lib/offline-windows-package.test.mjs
+        run: node e2e/chrome-103-checks.mjs unit
+      - name: Build production application
+        run: npm run build
+      - name: Share production build with independent UI suites
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-103-production-build
+          include-hidden-files: true
+          path: |
+            .next/
+            !.next/cache/**
+            !.next/dev/**
+            !.next/**/*.map
+          retention-days: 3
+
+  browser:
+    needs: build
+    name: Windows UI - ${{ matrix.suite }}
+    # 没有 Windows 10 托管机；Server 2022 中使用真实 103 和当前 Chromium。
+    runs-on: windows-2022
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, settings, content, platform, navigation]
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+      E2E_SUITE: ${{ matrix.suite }}
+      CHROME_103_NATIVE_PDF: ${{ matrix.suite == 'content' && '1' || '0' }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: chrome-103-production-build
+          path: .next
       - name: Install actual Chromium 103 and current Chromium
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          # 官方快照 1002885 对应 103.0.5060.0；固定对象代次和官方 MD5 防止下载错误版本。
           $archive = Join-Path $env:RUNNER_TEMP "chromium-103.zip"
           $directory = Join-Path $env:RUNNER_TEMP "chromium-103"
+          # 固定官方对象代次和校验和，不能只伪造浏览器 User-Agent。
           Invoke-WebRequest "https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/1002885/chrome-win.zip?generation=1652399340549393" -OutFile $archive
-          $actualHash = (Get-FileHash $archive -Algorithm MD5).Hash.ToLowerInvariant()
-          if ($actualHash -ne "5a1265254d46356f9f0d146bd5386b32") { throw "Chromium 103 archive checksum mismatch" }
+          if ((Get-FileHash $archive -Algorithm MD5).Hash.ToLowerInvariant() -ne "5a1265254d46356f9f0d146bd5386b32") { throw "Chromium 103 archive checksum mismatch" }
           Expand-Archive $archive -DestinationPath $directory
           "CHROME_103_PATH=$directory\chrome-win\chrome.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
           npx playwright install chromium
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Build production application
-        run: npm run build
-      - name: Check old and current browsers against production application
+      - name: Check production UI in both browsers
         run: node e2e/chrome-103.mjs
-      - name: Check Turbopack with old and current browsers
+      - name: Check Turbopack UI in both browsers
         run: node e2e/chrome-103.mjs
         env:
           E2E_SERVER_MODE: dev
-      - name: Upload logs, screenshots and browser versions
+      - name: Upload coverage evidence and diagnostics
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: chrome-103-windows-results
+          name: chrome-103-${{ matrix.suite }}-results
           path: test-results/chrome-103/
+          if-no-files-found: ignore
+          retention-days: 14
+
+  coverage:
+    needs: browser
+    if: always()
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: chrome-103-*-results
+          merge-multiple: true
+          path: test-results/chrome-103
+      - name: Require every suite, browser and build mode to pass
+        run: node e2e/chrome-103-coverage.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: chrome-103-full-site-coverage
+          path: test-results/chrome-103/full-site-coverage.json
           if-no-files-found: ignore
           retention-days: 14

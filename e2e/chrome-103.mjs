@@ -10,6 +10,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { chromium } from "playwright";
 import { showSidebarFiles, checkFilesPlacement } from "./sidebar.mjs";
+import { checkFullSiteSettings } from "./chrome-103-settings.mjs";
+import { prepareFullSiteContent, checkFullSiteContent } from "./chrome-103-content.mjs";
+import { checkFullSitePlatform } from "./chrome-103-platform.mjs";
+import { prepareFullSiteNavigation, checkFullSiteNavigation } from "./chrome-103-navigation.mjs";
 
 const require = createRequire(import.meta.url);
 const { rewriteCssValue } = require("../compat/chrome-103/values.cjs");
@@ -17,7 +21,10 @@ const { CHROME_103_INIT_SCRIPT } = require("../compat/chrome-103/init.cjs");
 const root = dirname(dirname(fileURLToPath(import.meta.url)));
 const mode = process.env.E2E_SERVER_MODE || "start";
 assert.ok(mode === "start" || mode === "dev", "E2E_SERVER_MODE must be start or dev");
-const artifacts = join(root, "test-results/chrome-103", mode);
+const suite = process.env.E2E_SUITE || "core";
+assert.ok(["core", "settings", "content", "platform", "navigation"].includes(suite), "Unknown E2E_SUITE");
+const authPassword = suite === "platform" ? "chrome-103-ui-fixture" : "";
+const artifacts = join(root, "test-results/chrome-103", suite, mode);
 const agentDir = mkdtempSync(join(tmpdir(), "pi-web-chrome-103-"));
 const project = join(agentDir, "project");
 const sessionDirectory = join(agentDir, "sessions", "compat");
@@ -35,6 +42,24 @@ for (let index = 0; index < 60; index++) {
       : `Question ${index}` } });
 }
 writeFileSync(join(sessionDirectory, `2026-11-03T00-00-00-000Z_${sessionId}.jsonl`), entries.map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+const fixtures = suite === "content" ? prepareFullSiteContent({ project, sessionDirectory, timestamp })
+  : suite === "navigation" ? prepareFullSiteNavigation({ agentDir, sessionDirectory, project, timestamp }) : null;
+const reports = [];
+let currentPhase = "server-start";
+let browserErrors = [];
+
+/**
+ * 保存已执行证据，即使后续页面失败也不丢失覆盖边界。
+ * 无参数：将每个浏览器的已通过项和明确的平台边界写入 CI artifact。
+ */
+function saveCoverage() {
+  writeFileSync(join(artifacts, "coverage.json"), JSON.stringify({ suite, mode, reports, boundaries: [
+    "Hosted runner is Windows Server 2022, not the user's Windows 10 1909 computer.",
+    "Third-party OAuth/model/package protocols use synthetic services; real account authorization, model inference and external installation are not claimed.",
+    "PDF codec/plugin painting and OS permissions are reported separately from application UI integration.",
+    "Terminal UI uses a controlled native SSE stream; actual Windows shell/PTY execution and system notification delivery are not claimed.",
+  ] }, null, 2));
+}
 
 /**
  * 验证元素在视口内且实际可点击，防止仅检查 DOM 存在。
@@ -149,7 +174,7 @@ try {
   const base = `http://127.0.0.1:${port}`;
   server = spawn(process.execPath, [join(root, "node_modules/next/dist/bin/next"), mode, "-H", "127.0.0.1", "-p", String(port)], {
     cwd: root,
-    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: "", NEXT_TELEMETRY_DISABLED: "1" },
+    env: { ...process.env, PI_CODING_AGENT_DIR: agentDir, PI_WEB_PASSWORD: authPassword, NEXT_TELEMETRY_DISABLED: "1" },
     stdio: ["ignore", "pipe", "pipe"],
   });
   server.stdout.pipe(serverLog, { end: false });
@@ -160,26 +185,65 @@ try {
   while (true) {
     if (serverError) throw serverError;
     assert.equal(server.exitCode, null, "Production server exited; inspect server.log");
-    const response = await fetch(`${base}/api/sessions`, { signal: AbortSignal.timeout(5000) }).catch(() => null);
+    const response = await fetch(`${base}/api/sessions`, {
+      signal: AbortSignal.timeout(5000),
+      headers: authPassword ? { Authorization: `Basic ${Buffer.from(`pi:${authPassword}`).toString("base64")}` } : {},
+    }).catch(() => null);
     if (response?.ok) break;
     assert.ok(Date.now() < deadline, "Production server readiness timed out");
     await delay(500);
   }
   const versions = [];
   for (const target of [{ name: "103", executablePath: process.env.CHROME_103_PATH }, { name: "current" }]) {
-    browser = await chromium.launch({ executablePath: target.executablePath });
+    browser = await chromium.launch({ executablePath: target.executablePath, headless: suite !== "content", args: suite === "content" ? ["--force-renderer-accessibility"] : [] });
     const version = browser.version();
     if (target.name === "103") assert.match(version, /^103\./, "Must use Chromium 103, not a spoofed User-Agent");
     versions.push({ browser: target.name, version });
+    const report = { browser: target.name, version, suite, mode, checks: [], limitations: [], passed: false };
+    reports.push(report);
+    const seen = new Set();
+    /**
+     * 记录已经断言成功的真实浏览器动作，重复或空证据会使 CI 失败。
+     * @param {string} id 页面/交互的稳定覆盖 ID。
+     * @param {string|object} detail 断言及真实本地服务/受控服务的说明。
+     */
+    const record = (id, detail) => {
+      assert.equal(typeof id, "string");
+      assert.ok(id && !seen.has(id), `Duplicate coverage: ${id}`);
+      assert.ok(detail && (typeof detail !== "string" || detail.trim()), `Missing evidence: ${id}`);
+      seen.add(id);
+      report.checks.push({ id, detail });
+      currentPhase = `${suite}/${target.name}: last completed ${id}`;
+      saveCoverage();
+    };
     context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US", reducedMotion: "reduce" });
+    // 验收只能连接隔离应用与 loopback 夹具，OAuth 展示地址不能真正访问第三方账号。
+    await context.route("**/*", (route) => {
+      const url = new URL(route.request().url());
+      return /^https?:$/.test(url.protocol) && !["127.0.0.1", "localhost", "[::1]"].includes(url.hostname) ? route.abort() : route.fallback();
+    });
     await context.tracing.start({ screenshots: true, snapshots: true });
     page = await context.newPage();
     page.setDefaultTimeout(30_000);
+    page.setDefaultNavigationTimeout(90_000);
     const errors = [];
+    browserErrors = errors;
     page.on("pageerror", (error) => errors.push(error.message));
-    if (target.name === "103") await checkOriginalRegression(page);
+    currentPhase = `${suite}/${target.name}: opening application`;
+    if (authPassword) {
+      const login = await context.request.post(`${base}/api/web-auth`, { data: { password: authPassword } });
+      assert.ok(login.ok(), "Authenticate only against the isolated fixture service");
+    }
+    if (suite === "core" && target.name === "103") await checkOriginalRegression(page);
     await page.goto(`${base}/?session=${sessionId}`);
     await page.locator(".chat-input-textarea").waitFor();
+    if (suite !== "core") {
+      const checks = { settings: checkFullSiteSettings, content: checkFullSiteContent, platform: checkFullSitePlatform, navigation: checkFullSiteNavigation };
+      const result = await checks[suite](page, { browser, base, project, artifacts, sessionId, authPassword, fixtures, record });
+      report.limitations = result?.uncovered || [];
+      const minimum = { settings: 37, content: 19, platform: 9, navigation: 2 };
+      assert.ok(report.checks.length >= minimum[suite], `Missing coverage for ${suite}: ${report.checks.length}`);
+    } else {
     await checkTranscript(page);
     await page.locator(".chat-input-textarea").fill("A preserved draft in Chrome 103");
     await page.setViewportSize({ width: 1100, height: 500 });
@@ -257,19 +321,24 @@ try {
       }
     });
     assert.equal(repeatedReads, 0, "Unrelated style changes must not recompute cached colors on every scroll frame");
+    record("core.layout-and-runtime", { service: "real-local-api", originalRegression: target.name === "103" ? "reproduced and repaired" : "not applicable; native viewport units", assertions: "transcript wheel; composer visibility and draft; small window; sidebar placements; text file; six settings surfaces (not their full workflows); theme mouse/keyboard; Debug/directory; reload; dynamic inline/CSSOM colors; no repeated canvas work" });
+    }
     await page.screenshot({ path: join(artifacts, `${target.name}-after.png`) });
     assert.deepEqual(errors, [], "Application must not throw browser errors");
+    report.passed = true;
+    saveCoverage();
     await context.tracing.stop({ path: join(artifacts, `${target.name}-trace.zip`) });
     await browser.close();
     browser = context = page = null;
-    console.log(`PASS Windows Chromium ${version}: original regression, transcript, input, sidebar, files, all settings, themes and reload`);
-    console.log(`::notice title=${mode} browser passed::Chromium ${version}: all compatibility checks passed`);
+    console.log(`PASS Windows Chromium ${version}: ${suite} ${mode}, ${report.checks.length} recorded UI checks`);
+    console.log(`::notice title=${suite} ${mode} browser passed::Chromium ${version}: ${report.checks.length} recorded UI checks passed; boundaries in coverage.json`);
   }
   writeFileSync(join(artifacts, "versions.json"), JSON.stringify(versions, null, 2));
 } catch (error) {
+  saveCoverage();
   // 将实际错误写入 Actions annotation，公开运行页也可直接定位失败，无需读取凭据。
   const surfaces = await page?.locator('[role="menu"]:visible, [role="dialog"]:visible').allTextContents().catch(() => []);
-  const message = `${error.stack || error}\nVisible dialogs/menus: ${surfaces?.join(" | ").slice(0, 2000) || "none"}`;
+  const message = `${currentPhase}\n${error.stack || error}\nBrowser exceptions: ${browserErrors.join(" | ").slice(0, 1500) || "none"}\nVisible dialogs/menus: ${surfaces?.join(" | ").slice(0, 2000) || "none"}`;
   const details = message.replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
   console.error(`::error title=Windows browser regression::${details}`);
   await page?.screenshot({ path: join(artifacts, "failure.png") }).catch(() => {});

@@ -8,6 +8,7 @@
 - `loader.cjs` / `next-config.ts`：在 webpack 和 Turbopack 编译组件前处理内联样式和 styled-jsx。
 - `postcss.cjs`：在 Tailwind 之后处理全局 CSS、CSS Modules 和静态现代颜色；兼容分支在 base 层显式初始化属性默认值，仍保留原生 `@property`。
 - `init.cjs`：在应用代码前补充缺失 API。旧浏览器使用 `vh`；混色按当前主题计算预乘 alpha 的 sRGB 颜色，主题切换、动态内联样式和后加载的样式表会更新。原生 oklab 混色在旧浏览器近似为 sRGB；`currentColor` 混色采用根文本颜色，属于视觉回退，并非完整 CSS Color 规范 polyfill。
+- Mermaid 链接还依赖 `URL.canParse`，入口脚本只在该 API 缺失时安装基于原生 URL 构造器的回退，保留原生字符串转换异常。
 - `fallbacks.css`：设置表单的选中/焦点状态及 Debug 容器查询回退。
 
 ## 跟随上游更新
@@ -22,5 +23,9 @@
 ## 测试范围
 
 Windows workflow 执行 lint、typecheck、兼容转换/API 和 Windows 打包回归，再构建生产应用。生产 webpack 与开发 Turbopack 分别运行真实 103 和当前浏览器，验证原问题的失败/恢复、长对话滚轮、输入框可见、窗口缩放、侧栏布局切换、文件查看、设置六个页面、主题与键盘选中、短窗口设置滚动、草稿保留和刷新，以及动态样式表/随面板挂载插入的 CSSOM 规则。截图用于补充视觉检查。
+
+全站验收进一步分成 `core`、`settings`、`content`、`platform`、`navigation` 五套。构建一次后，Windows 矩阵独立执行各套的生产/开发模式及103/当前浏览器，共20组执行；`e2e/chrome-103-cases.json` 列出明确的验收ID。汇总作业要求每个ID在对应执行中实际记录成功，缺少一组、某项未执行或只有部分报告都会失败。
+
+`chrome-103-full-site-coverage` artifact 中的 JSON 保存每项动作、模拟服务标记和平台边界。设置表单和外部认证/终端协议由受控服务驱动真实组件；本地会话、文件、真实Git工作树等直接访问隔离的应用服务。内容套件采用headed Chromium，测试真实DOCX转换、PCM WAV、VP8 WebM、原生PDF可观测状态；不同编码器、OS通知、真实模型/第三方登录/安装、实际PTY以及Win10具体机器不能由模拟服务的成功代替。
 
 未来上游若增加新的浏览器 API、CSS 功能或三方依赖，这一层不会自动保证其兼容，需由同一工作流发现并补充回退。

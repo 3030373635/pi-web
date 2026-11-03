@@ -5,6 +5,30 @@
  * 无参数：序列化到页面头部执行，只访问浏览器全局对象。
  */
 function installChrome103Compatibility() {
+  if (typeof URL !== "undefined" && typeof URL.canParse !== "function") {
+    /**
+     * 为 Mermaid 链接校验提供与 URL 构造器一致的解析结果。
+     * @param {unknown} input 待解析的地址，必须提供。
+     * @param {unknown} base 可选基地址；转换异常仍应抛出，格式无效则返回 false。
+     * @returns {boolean} 地址是否可被浏览器 URL 构造器解析。
+     */
+    Object.defineProperty(URL, "canParse", {
+      configurable: true,
+      writable: true,
+      value: function canParse(input, base) {
+        if (!arguments.length) throw new TypeError("URL.canParse requires an input argument");
+        // 在 try 外执行字符串转换，不能吞掉 Symbol 或自定义转换器的异常。
+        const address = `${input}`;
+        const origin = base === undefined ? undefined : `${base}`;
+        try {
+          new URL(address, origin);
+          return true;
+        } catch {
+          return false;
+        }
+      },
+    });
+  }
   /**
    * 为数组添加倒序查找，支持稀疏数组及类数组对象。
    * @param {string} name 需要安装的方法名。
