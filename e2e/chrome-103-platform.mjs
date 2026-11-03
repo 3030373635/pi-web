@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { readFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -310,24 +311,42 @@ async function checkChatCompaction(page, { chat, agentCommands, artifacts, recor
 /**
  * 验证附件按钮的真实文件选择、非图片上传、图片原字节发送及富文本粘贴处理。
  * @param {import("playwright").Page} page 当前应用页面。
- * @param {object} options chat 为模型替身，agentCommands/uploadRequests 为请求日志，artifacts 为截图目录，record 为成功记录器。
+ * @param {object} options project 为隔离测试目录，chat 为模型替身，agentCommands/uploadRequests 为请求日志，artifacts 为截图目录，record 为成功记录器。
  */
-async function checkChatAttachments(page, { chat, agentCommands, uploadRequests, artifacts, record }) {
+async function checkChatAttachments(page, { project, chat, agentCommands, uploadRequests, artifacts, record }) {
+  const uploadName = "platform-upload.txt";
+  const uploadFile = join(project, uploadName);
+  const uploadBytes = Buffer.from("PLATFORM_UPLOAD_BYTES", "utf8");
+  // harness 的 project 是专用临时目录；仅移除本 case 的固定文件，避免下一浏览器命中 skip。
+  rmSync(uploadFile, { force: true });
   const composer = page.locator(".chat-input-textarea");
   const attach = page.getByRole("button", { name: "Attach files", exact: true });
   await reachable(attach);
   const chooserEvent = page.waitForEvent("filechooser");
   await attach.click();
   const chooser = await chooserEvent;
-  // 只创建内存中的标准 1×1 PNG 与文本文件，不读取或写入用户文件。
+  // 只提供内存中的标准 1×1 PNG 与文本夹具；真实上传仅允许落入隔离 project。
   const png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=";
-  await chooser.setFiles([
-    { name: "platform-image.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") },
-    { name: "platform-upload.txt", mimeType: "text/plain", buffer: Buffer.from("PLATFORM_UPLOAD_BYTES", "utf8") },
+  const [uploadResponse] = await Promise.all([
+    page.waitForResponse((response) => {
+      const url = new URL(response.url());
+      return response.request().method() === "POST" && url.pathname.startsWith("/api/files/") && url.searchParams.get("type") === "upload";
+    }),
+    chooser.setFiles([
+      { name: "platform-image.png", mimeType: "image/png", buffer: Buffer.from(png, "base64") },
+      { name: uploadName, mimeType: "text/plain", buffer: uploadBytes },
+    ]),
   ]);
+  assert.equal(uploadResponse.status(), 200, "Fixture upload must succeed through the real local file API");
+  const uploadResult = await uploadResponse.json();
+  assert.deepEqual(uploadResult.uploaded, [uploadName], "Only the non-image attachment may reach the file upload");
+  assert.deepEqual(uploadResult.skipped, []);
+  assert.deepEqual(uploadResult.errors, []);
+  assert.deepEqual(readFileSync(uploadFile), uploadBytes, "Browser multipart upload must preserve every original byte on disk");
   await waitEvidence(() => uploadRequests.length === 1, "Non-image selection must use the upload API once");
   await page.waitForFunction(() => document.querySelector(".chat-input-textarea")?.value.includes("@platform-upload.txt"));
   await page.getByText("Copied 1 file(s) into the working directory", { exact: true }).waitFor();
+  record("platform.chat.upload-local-file", { service: "real-local-files", assertions: "real Attach files chooser -> original browser multipart POST to isolated application file API; exact cwd/header/conflict=skip; API uploaded only text fixture; disk filename and all bytes equal in-memory fixture; success notice and @mention", bytes: uploadBytes.length });
   const preview = page.locator('.chat-input-shell img[src^="blob:"]');
   await preview.waitFor();
   await page.waitForFunction(() => {
@@ -345,7 +364,7 @@ async function checkChatAttachments(page, { chat, agentCommands, uploadRequests,
   chat.finish();
   await page.getByRole("button", { name: "Stop", exact: true }).and(page.getByTitle("Stop agent", { exact: true })).waitFor({ state: "hidden" });
   await preview.waitFor({ state: "detached" });
-  record("platform.chat.attach-upload-image", { service: "mocked-service", assertions: "real Attach files chooser; multipart files field + original filename/bytes; conflict=skip; success notice and @mention; decoded image preview; prompt images preserve exact PNG bytes; SSE reply settles and preview clears", uploads: uploadRequests.length });
+  record("platform.chat.attach-upload-image", { service: "mocked-service", uploadService: "real-local-files", assertions: "real Attach files chooser and local file upload; decoded image preview; mocked agent prompt images preserve exact PNG bytes; SSE reply settles and preview clears", uploads: uploadRequests.length });
 
   await composer.fill("");
   // ClipboardEvent 只模拟剪贴板数据；由真实 textarea 的 onPaste 完成 Markdown 转换，未注入 DOM。
@@ -644,12 +663,10 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
       assert.equal(method, "POST");
       assert.equal(url.searchParams.get("conflict"), "skip", "Composer uploads must not replace an existing file");
       assert.match(request.headers()["content-type"], /^multipart\/form-data; boundary=/);
-      const body = request.postDataBuffer().toString("utf8");
-      assert.ok(body.includes('name="files"; filename="platform-upload.txt"'));
-      assert.ok(body.includes("PLATFORM_UPLOAD_BYTES"));
-      assert.equal(body.includes("platform-image.png"), false, "Images attach to the prompt rather than the file upload");
-      uploadRequests.push({ path, conflict: "skip", name: "platform-upload.txt", bytes: "PLATFORM_UPLOAD_BYTES" });
-      return route.fulfill({ json: { uploaded: ["platform-upload.txt"], skipped: [], errors: [] } });
+      uploadRequests.push({ path, conflict: "skip", service: "real-local-files" });
+      // Chromium 的含 File multipart 可能没有 Playwright postDataBuffer；保留原始浏览器请求体。
+      // 成功响应与隔离目录的实际字节由附件 case 验收，不能以空请求体替代或伪造上传成功。
+      return route.continue();
     }
     if (path.startsWith(`/api/agent/${childId}`)) {
       childAgentRequests.push(path);
@@ -739,7 +756,7 @@ export async function checkFullSitePlatform(page, { base, project, artifacts, se
     await checkExtensions(page, { events, agentCommands, artifacts, record });
     await checkChatLifecycle(page, { chat, events, agentCommands, artifacts, record });
     await checkChatCompaction(page, { chat, agentCommands, artifacts, record });
-    await checkChatAttachments(page, { chat, agentCommands, uploadRequests, artifacts, record });
+    await checkChatAttachments(page, { project, chat, agentCommands, uploadRequests, artifacts, record });
     // 登出使用隔离服务真实 cookie，补上与受控登录 UI 不同的服务集成路径。
     await page.getByRole("button", { name: "Settings", exact: true }).click();
     const settings = page.getByRole("dialog", { name: "Settings", exact: true });

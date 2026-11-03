@@ -11,13 +11,14 @@ const FORBIDDEN_COMMANDS = new Set(["prompt", "steer", "follow_up", "fork", "for
  * 限制底层 CDP 命令等待；Playwright 的 page timeout 不会覆盖这些浏览器级请求。
  * @param {Promise<unknown>} operation 已发出的浏览器协议操作。
  * @param {string} label 超时时公开报告的具体阶段。
+ * @param {number} timeoutMs 单步期限，清理使用更短期限以保留原始失败。
  * @returns {Promise<unknown>} 原操作的结果，不改变正常协议行为。
  */
-async function boundedProtocolStep(operation, label) {
+async function boundedProtocolStep(operation, label, timeoutMs = 30_000) {
   let timer;
   try {
     return await Promise.race([operation, new Promise((_, reject) => {
-      timer = setTimeout(() => reject(new Error(`Navigation protocol timed out: ${label}`)), 30_000);
+      timer = setTimeout(() => reject(new Error(`Navigation protocol timed out: ${label}`)), timeoutMs);
     })]);
   } finally {
     clearTimeout(timer);
@@ -28,6 +29,10 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, locale: "en-US" });
   await context.tracing.start({ screenshots: true, snapshots: true });
   const errors = [];
+  const pendingRequests = new Map();
+  context.on("request", (request) => pendingRequests.set(request, `${request.method()} ${request.url()}`));
+  context.on("requestfinished", (request) => pendingRequests.delete(request));
+  context.on("requestfailed", (request) => pendingRequests.delete(request));
   const watch = (target) => {
     target.on("pageerror", (error) => errors.push(error.message));
     target.on("console", (event) => { if (event.type() === "error") errors.push(event.text()); });
@@ -281,13 +286,14 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await context.tracing.stop();
   } catch (error) {
     // 先公开原始失败，再保存较慢的 trace，避免清理等待掩盖真正卡住的步骤。
-    const details = String(error.stack || error).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    const details = `${error.stack || error}\nPending requests: ${JSON.stringify([...pendingRequests.values()])}\nTabs: ${JSON.stringify(context.pages().map((tab) => tab.url()))}`
+      .replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
     console.error(`::error title=Session navigation failed::${details}`);
-    await page.screenshot({ path: join(artifacts, "session-navigation-failure.png") }).catch(() => {});
-    await context.tracing.stop({ path: join(artifacts, "session-navigation-trace.zip") }).catch(() => {});
+    await page.screenshot({ path: join(artifacts, "session-navigation-failure.png"), timeout: 5000 }).catch(() => {});
+    await boundedProtocolStep(context.tracing.stop({ path: join(artifacts, "session-navigation-trace.zip") }), "save failed navigation trace", 10_000).catch(() => {});
     throw error;
   } finally {
-    await boundedProtocolStep(browserSession.detach(), "detach browser session").catch(() => {});
-    await context.close();
+    await boundedProtocolStep(browserSession.detach(), "detach browser session", 10_000).catch(() => {});
+    await boundedProtocolStep(context.close(), "close navigation context", 10_000).catch(() => {});
   }
 }

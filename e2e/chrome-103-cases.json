@@ -73,6 +73,7 @@
     "platform.chat.prompt-stream-settle",
     "platform.chat.stop-abort",
     "platform.chat.compact",
+    "platform.chat.upload-local-file",
     "platform.chat.attach-upload-image",
     "platform.chat.rich-paste",
     "platform.login.error-retry-success",

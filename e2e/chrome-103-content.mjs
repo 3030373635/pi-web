@@ -399,6 +399,43 @@ async function checkMediaPlayback(page, kind) {
 }
 
 /**
+ * 限制浏览器底层操作的真实等待时间，错误保留具体阶段供 CI 定位。
+ * @param {() => Promise<unknown>} operation 延后开始的浏览器操作。
+ * @param {string|(() => string)} label 固定标签或超时时读取的当前操作说明。
+ * @param {number} timeoutMs 单次等待的毫秒上限。
+ * @returns {Promise<unknown>} 操作的真实结果。
+ */
+async function boundedContentStep(operation, label, timeoutMs = 2000) {
+  let timer;
+  try {
+    return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = new Error(`Content protocol timed out after ${timeoutMs}ms: ${typeof label === "function" ? label() : label}`);
+        error.code = "CONTENT_STEP_TIMEOUT";
+        reject(error);
+      }, timeoutMs);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * 保留单入口失败诊断，让其余真实观察路径继续；总预算耗尽仍抛出。
+ * @param {Error & {code?:string}} error 浏览器操作的失败。
+ * @param {string} label 包含 frame URL 的操作名称。
+ * @param {object[]} diagnostics 当前探测轮次的诊断记录。
+ * @param {unknown} fallback 单个入口失败的占位值，不能作为 PDF 成功证据。
+ * @returns {unknown} 供下一条真实观察路径使用的后备值。
+ */
+function pdfProbeFallback(error, label, diagnostics, fallback) {
+  if (error.code === "CONTENT_PROBE_DEADLINE") throw error;
+  diagnostics.push({ operation: label, error: error.message });
+  if (diagnostics.length > 20) diagnostics.shift();
+  return fallback;
+}
+
+/**
  * 读取真实 PDF 插件状态或其解码后的可访问文字，插件不可观测即失败。
  * @param {import('playwright').Page} page 包含 PDF iframe 的页面。
  * @param {number} expectedPage 期望的当前页码。
@@ -406,86 +443,128 @@ async function checkMediaPlayback(page, kind) {
  */
 async function checkNativePdfViewer(page, expectedPage) {
   const deadline = Date.now() + 25_000;
-  let last = [];
-  const cdp = await page.context().newCDPSession(page);
-  const sessions = [cdp];
+  const sessions = [];
   const attachedFrames = new Set([page.mainFrame()]);
+  const probeFailures = [];
+  let last = [];
+  let activeOperation = `native PDF setup; frame=${page.url()}`;
+  let stopped = false;
+  // 每次调用都受剩余总预算约束，外层硬超时后不再发起新的协议操作。
+  const step = async (operation, label) => {
+    activeOperation = label;
+    const remaining = deadline - Date.now();
+    if (stopped || remaining <= 0) {
+      const error = new Error(`Native PDF total probe deadline reached: ${label}`);
+      error.code = "CONTENT_PROBE_DEADLINE";
+      throw error;
+    }
+    return boundedContentStep(operation, label, Math.min(2000, remaining));
+  };
   try {
-    await cdp.send("DOM.enable");
-    await cdp.send("Accessibility.enable");
-    while (Date.now() < deadline) {
-      last = [];
-      for (const frame of page.frames()) {
-        if (!attachedFrames.has(frame)) {
-          attachedFrames.add(frame);
-          const frameSession = await page.context().newCDPSession(frame).catch(() => null);
-          if (frameSession) {
-            await frameSession.send("DOM.enable").catch(() => {});
-            await frameSession.send("Accessibility.enable").catch(() => {});
-            sessions.push(frameSession);
-          }
+    return await boundedContentStep(async () => {
+      const pageLabel = `frame=${page.url()}`;
+      const attachLabel = `PDF attach page CDP; ${pageLabel}`;
+      const cdp = await step(() => page.context().newCDPSession(page), attachLabel)
+        .catch((error) => pdfProbeFallback(error, attachLabel, probeFailures, null));
+      if (cdp) {
+        sessions.push({ session: cdp, label: pageLabel });
+        for (const command of ["DOM.enable", "Accessibility.enable"]) {
+          const label = `PDF ${command}; ${pageLabel}`;
+          await step(() => cdp.send(command), label).catch((error) => pdfProbeFallback(error, label, probeFailures, null));
         }
-        const state = await frame.evaluate(() => {
-          const roots = [document];
-          for (let index = 0; index < roots.length; index += 1) {
-            for (const element of roots[index].querySelectorAll("*")) {
-              if (element.localName === "pdf-viewer") {
-                const toolbar = element.shadowRoot?.querySelector("viewer-toolbar, viewer-pdf-toolbar-new, viewer-pdf-toolbar");
-                return {
-                  method: "native-pdf-viewer-properties", url: location.href,
-                  pages: element.docLength_ ?? toolbar?.docLength,
-                  page: element.pageNo_ ?? toolbar?.pageNo,
-                  progress: element.loadProgress_ ?? toolbar?.loadProgress,
-                };
+      }
+      while (Date.now() < deadline && !stopped) {
+        last = [];
+        for (const frame of page.frames()) {
+          const frameLabel = `frame=${frame.url()}`;
+          if (!attachedFrames.has(frame)) {
+            attachedFrames.add(frame);
+            const label = `PDF attach frame CDP; ${frameLabel}`;
+            const frameSession = await step(() => page.context().newCDPSession(frame), label)
+              .catch((error) => pdfProbeFallback(error, label, probeFailures, null));
+            if (frameSession) {
+              sessions.push({ session: frameSession, label: frameLabel });
+              for (const command of ["DOM.enable", "Accessibility.enable"]) {
+                const commandLabel = `PDF ${command}; ${frameLabel}`;
+                await step(() => frameSession.send(command), commandLabel)
+                  .catch((error) => pdfProbeFallback(error, commandLabel, probeFailures, null));
               }
-              if (element.shadowRoot) roots.push(element.shadowRoot);
             }
           }
-          return { url: location.href, viewer: false };
-        }).catch((error) => ({ url: frame.url(), error: error.message }));
-        last.push(state);
-        if (state.pages === 2 && state.page === expectedPage && state.progress === 100) return state;
-      }
-      for (const session of sessions) {
-        // DevTools 只读 DOM 可以穿过插件的 closed shadow root，页面 JS 则不能。
-        const documentTree = await session.send("DOM.getDocument", { depth: -1, pierce: true }).catch(() => null);
-        const nodes = documentTree ? [documentTree.root] : [];
-        for (let index = 0; index < nodes.length; index += 1) {
-          const node = nodes[index];
-          nodes.push(...(node.children ?? []), ...(node.shadowRoots ?? []));
-          if (node.contentDocument) nodes.push(node.contentDocument);
-          if (node.nodeName?.toLowerCase() !== "pdf-viewer") continue;
-          const resolved = await session.send("DOM.resolveNode", { nodeId: node.nodeId }).catch(() => null);
-          if (!resolved?.object?.objectId) continue;
-          const objectId = resolved.object.objectId;
-          try {
-            const response = await session.send("Runtime.callFunctionOn", {
-              objectId, returnByValue: true,
-              functionDeclaration: "function() { return { method: 'native-pdf-cdp-properties', pages: this.docLength_, page: this.pageNo_, progress: this.loadProgress_ }; }",
-            }).catch(() => null);
-            const state = response?.result?.value;
-            last.push(state);
-            if (state?.pages === 2 && state.page === expectedPage && state.progress === 100) return state;
-          } finally {
-            await session.send("Runtime.releaseObject", { objectId }).catch(() => {});
+          const label = `PDF frame.evaluate viewer properties; ${frameLabel}`;
+          const state = await step(() => frame.evaluate(() => {
+            const roots = [document];
+            for (let index = 0; index < roots.length; index += 1) {
+              for (const element of roots[index].querySelectorAll("*")) {
+                if (element.localName === "pdf-viewer") {
+                  const toolbar = element.shadowRoot?.querySelector("viewer-toolbar, viewer-pdf-toolbar-new, viewer-pdf-toolbar");
+                  return {
+                    method: "native-pdf-viewer-properties", url: location.href,
+                    pages: element.docLength_ ?? toolbar?.docLength,
+                    page: element.pageNo_ ?? toolbar?.pageNo,
+                    progress: element.loadProgress_ ?? toolbar?.loadProgress,
+                  };
+                }
+                if (element.shadowRoot) roots.push(element.shadowRoot);
+              }
+            }
+            return { url: location.href, viewer: false };
+          }), label).catch((error) => pdfProbeFallback(error, label, probeFailures, { url: frame.url(), error: error.message }));
+          last.push(state);
+          if (state.pages === 2 && state.page === expectedPage && state.progress === 100) return { ...state, probeDiagnostics: probeFailures };
+        }
+        for (const { session, label: frameLabel } of sessions) {
+          // DevTools 只读 DOM 可以穿过插件的 closed shadow root，页面 JS 则不能。
+          const treeLabel = `PDF DOM.getDocument pierce; ${frameLabel}`;
+          const documentTree = await step(() => session.send("DOM.getDocument", { depth: -1, pierce: true }), treeLabel)
+            .catch((error) => pdfProbeFallback(error, treeLabel, probeFailures, null));
+          const nodes = documentTree ? [documentTree.root] : [];
+          for (let index = 0; index < nodes.length; index += 1) {
+            const node = nodes[index];
+            nodes.push(...(node.children ?? []), ...(node.shadowRoots ?? []));
+            if (node.contentDocument) nodes.push(node.contentDocument);
+            if (node.nodeName?.toLowerCase() !== "pdf-viewer") continue;
+            const resolveLabel = `PDF DOM.resolveNode viewer=${node.nodeId}; ${frameLabel}`;
+            const resolved = await step(() => session.send("DOM.resolveNode", { nodeId: node.nodeId }), resolveLabel)
+              .catch((error) => pdfProbeFallback(error, resolveLabel, probeFailures, null));
+            if (!resolved?.object?.objectId) continue;
+            const objectId = resolved.object.objectId;
+            try {
+              const callLabel = `PDF Runtime.callFunctionOn viewer properties; ${frameLabel}`;
+              const response = await step(() => session.send("Runtime.callFunctionOn", {
+                objectId, returnByValue: true,
+                functionDeclaration: "function() { return { method: 'native-pdf-cdp-properties', pages: this.docLength_, page: this.pageNo_, progress: this.loadProgress_ }; }",
+              }), callLabel).catch((error) => pdfProbeFallback(error, callLabel, probeFailures, null));
+              const state = response?.result?.value;
+              last.push(state);
+              if (state?.pages === 2 && state.page === expectedPage && state.progress === 100) return { ...state, probeDiagnostics: probeFailures };
+            } finally {
+              await boundedContentStep(() => session.send("Runtime.releaseObject", { objectId }), `PDF cleanup Runtime.releaseObject; ${frameLabel}`, 500)
+                .catch((error) => console.error(error.message));
+            }
           }
+          const axLabel = `PDF Accessibility.getFullAXTree; ${frameLabel}`;
+          const accessibility = await step(() => session.send("Accessibility.getFullAXTree"), axLabel)
+            .catch((error) => pdfProbeFallback(error, axLabel, probeFailures, { nodes: [] }));
+          const expectedText = `Chrome103 page ${expectedPage}`;
+          const labels = accessibility.nodes.map((node) => String(node.name?.value ?? "").trim());
+          if (labels.includes(expectedText)) {
+            // 该文字只存在于 PDF 内容流；不把 iframe URL 或 embed 壳当解码成功。
+            return { method: "native-pdf-accessibility-text", decodedText: expectedText, probeDiagnostics: probeFailures,
+              pages: labels.includes("Chrome103 page 1") && labels.includes("Chrome103 page 2") ? 2 : null,
+              activePage: "not observable through AX; iframe fragment checked separately" };
+          }
+          last.push({ method: "native-pdf-accessibility-text", decodedTextFound: false, nodeCount: accessibility.nodes.length });
         }
-        const accessibility = await session.send("Accessibility.getFullAXTree").catch(() => ({ nodes: [] }));
-        const expectedText = `Chrome103 page ${expectedPage}`;
-        const labels = accessibility.nodes.map((node) => String(node.name?.value ?? "").trim());
-        if (labels.includes(expectedText)) {
-          // 该文字只存在于 PDF 内容流；不把 iframe URL 或 embed 壳当解码成功。
-          return { method: "native-pdf-accessibility-text", decodedText: expectedText,
-            pages: labels.includes("Chrome103 page 1") && labels.includes("Chrome103 page 2") ? 2 : null,
-            activePage: "not observable through AX; iframe fragment checked separately" };
-        }
-        last.push({ method: "native-pdf-accessibility-text", decodedTextFound: false, nodeCount: accessibility.nodes.length });
+        await step(() => delay(200), "PDF wait for observable plugin state");
       }
-      await delay(200);
-    }
-    assert.fail(`Native Chromium PDF viewer must expose loaded page ${expectedPage} state or its decoded PDF text; observed ${JSON.stringify(last)}`);
+      assert.fail(`Native Chromium PDF viewer must expose loaded page ${expectedPage} state or its decoded PDF text; observed=${JSON.stringify(last)}; probeFailures=${JSON.stringify(probeFailures)}`);
+    }, () => `Native PDF total probe; active operation=${activeOperation}; observed=${JSON.stringify(last)}; probeFailures=${JSON.stringify(probeFailures)}`, 25_000);
   } finally {
-    for (const session of sessions.reverse()) await session.detach().catch(() => {});
+    stopped = true;
+    // 并行且逐项限时，插件失去执行上下文时 detach 也不能挂住失败清理。
+    await Promise.all(sessions.map(({ session, label }) => boundedContentStep(() => session.detach(), `PDF cleanup detach CDP; ${label}`, 1000)
+      .catch((error) => console.error(error.message))));
   }
 }
 
@@ -500,6 +579,7 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
   const routes = [];
   const initialPages = new Set(page.context().pages());
   const preferences = await page.evaluate(() => Object.fromEntries(["pi-tool-preset", "pi-sidebar-width", "pi-right-panel-width"].map((key) => [key, localStorage.getItem(key)])));
+  let contentFailure;
   try {
     await page.setViewportSize({ width: 1280, height: 860 });
     await page.goto(`${base}/?session=${fixtures.sessionId}`, { waitUntil: "domcontentloaded" });
@@ -707,7 +787,8 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     if (process.env.CHROME_103_NATIVE_PDF === "1") {
       const nativePdf = await checkNativePdfViewer(page, 2);
       record("files.pdf-native", `real-browser-plugin: ${JSON.stringify(nativePdf)}; native PDF raster pixels are not compared`);
-      await pdfFrame.screenshot({ path: join(artifacts, `${browserMajor}-fullsite-native-pdf-page-2.png`) });
+      await boundedContentStep(() => pdfFrame.screenshot({ path: join(artifacts, `${browserMajor}-fullsite-native-pdf-page-2.png`) }),
+        `Native PDF screenshot; page=${page.url()}`, 5000);
     }
     await page.screenshot({ path: join(artifacts, `${browserMajor}-fullsite-content-files.png`) });
     await panel.getByRole("button", { name: "Hide file panel", exact: true }).click();
@@ -785,24 +866,56 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     assert.equal(await page.locator(".chat-input-textarea").inputValue(), "Chrome103 unsent draft");
     await page.locator(".chat-input-textarea").fill("");
     record("chat.composer-selectors", "mocked-service: ten-model /api/models catalog; New composer; filter/select model Two, reasoning high, chat-only/read-only presets; unsent draft retained; no model request or credential use");
+  } catch (error) {
+    contentFailure = error;
+    throw error;
   } finally {
-    for (const [pattern, handler] of routes.reverse()) await page.unroute(pattern, handler).catch(() => {});
-    for (const extraPage of page.context().pages()) if (!initialPages.has(extraPage)) await extraPage.close().catch(() => {});
-    // 关闭内容测试创建的文件标签，不把监听器和预览窗口留给后续模块。
-    await page.keyboard.press("Escape").catch(() => {});
-    const showPanel = page.getByRole("button", { name: "Show file panel", exact: true });
-    if (await showPanel.isVisible()) await showPanel.click().catch(() => {});
-    for (const filePath of Object.values(fixtures.files)) {
-      const close = page.locator("#file-panel").getByRole("button", { name: `Close ${basename(filePath)}`, exact: true });
-      if (await close.count()) await close.click({ force: true }).catch(() => {});
+    // 失败尽快交还现场；成功恢复多标签和开发页面时留足正常 Windows I/O 时间。
+    const cleanupTimeoutMs = contentFailure ? 8000 : 30_000;
+    const cleanupDeadline = Date.now() + cleanupTimeoutMs;
+    const cleanupFailures = [];
+    let cleanupOperation = "start content cleanup";
+    // 参数分别是延迟执行的清理操作、诊断标签和单次毫秒上限；总预算耗尽后不再启动操作。
+    const cleanupStep = async (operation, label, timeoutMs = contentFailure ? 1000 : 3000) => {
+      cleanupOperation = label;
+      const remaining = cleanupDeadline - Date.now();
+      if (remaining <= 0) throw new Error(`Content cleanup deadline reached: ${label}`);
+      return boundedContentStep(operation, `Content cleanup ${label}; page=${page.url()}`, Math.min(timeoutMs, remaining))
+        .catch((error) => { cleanupFailures.push(error.message); });
+    };
+    try {
+      await boundedContentStep(async () => {
+        for (const [pattern, handler] of routes.reverse()) await cleanupStep(() => page.unroute(pattern, handler), `unroute ${pattern}`);
+        for (const extraPage of page.context().pages()) {
+          if (!initialPages.has(extraPage)) await cleanupStep(() => extraPage.close(), `close extra page ${extraPage.url()}`);
+        }
+        // 失败保留原始 PDF/页面现场给根 harness 取证，避免重开会话掩盖异常。
+        if (contentFailure) return;
+        await cleanupStep(() => page.keyboard.press("Escape"), "dismiss dialog");
+        const showPanel = page.getByRole("button", { name: "Show file panel", exact: true });
+        await cleanupStep(async () => { if (await showPanel.isVisible()) await showPanel.click(); }, "show file panel");
+        for (const filePath of Object.values(fixtures.files)) {
+          await cleanupStep(async () => {
+            const close = page.locator("#file-panel").getByRole("button", { name: `Close ${basename(filePath)}`, exact: true });
+            if (await close.count()) await close.click({ force: true });
+          }, `close fixture tab ${filePath}`);
+        }
+        await cleanupStep(() => page.evaluate((saved) => {
+          for (const [key, value] of Object.entries(saved)) {
+            if (value === null) localStorage.removeItem(key);
+            else localStorage.setItem(key, value);
+          }
+        }, preferences), "restore browser preferences");
+        if (originalViewport) await cleanupStep(() => page.setViewportSize(originalViewport), "restore viewport");
+        await cleanupStep(() => page.goto(`${base}/?session=${sessionId}`, { waitUntil: "domcontentloaded" }), "return to original session", 10_000);
+      }, () => `Content cleanup total deadline; active operation=${cleanupOperation}; page=${page.url()}`, cleanupTimeoutMs);
+    } catch (error) {
+      cleanupFailures.push(error.message);
     }
-    await page.evaluate((saved) => {
-      for (const [key, value] of Object.entries(saved)) {
-        if (value === null) localStorage.removeItem(key);
-        else localStorage.setItem(key, value);
-      }
-    }, preferences).catch(() => {});
-    if (originalViewport) await page.setViewportSize(originalViewport);
-    await page.goto(`${base}/?session=${sessionId}`, { waitUntil: "domcontentloaded" });
+    if (cleanupFailures.length) {
+      const message = `Content cleanup failures: ${cleanupFailures.join("; ")}`;
+      if (contentFailure) console.error(message);
+      else throw new Error(message);
+    }
   }
 }

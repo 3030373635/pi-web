@@ -53,6 +53,7 @@ export async function checkFullSiteNavigation(page, { browser, base, artifacts, 
     return response.json();
   }
   await page.goto("about:blank");
+  let completed = false;
   try {
     await checkSessionNavigation({
       browser, base, artifacts, a: fixtures.a, b: fixtures.b, api,
@@ -66,7 +67,9 @@ export async function checkFullSiteNavigation(page, { browser, base, artifacts, 
     mkdirSync(fixtures.project.empty, { recursive: true });
     await checkProjectNavigation({ browser, base, artifacts, fixture: fixtures.project, otherSessionId: fixtures.a.id, api, post });
     record("navigation.projects-worktrees", { service: "real-local-api", assertions: "actual linked Git worktree, project menus, current/other/empty project new tabs, preserved drafts and HTML iframe, in-place new composer, unavailable directory; desktop and narrow layouts" });
+    completed = true;
   } finally {
-    await page.goto(`${base}/?session=${sessionId}`, { waitUntil: "domcontentloaded" });
+    // 失败时由外层关闭浏览器；重新请求已卡住的服务会掩盖最初的导航异常。
+    if (completed) await page.goto(`${base}/?session=${sessionId}`, { waitUntil: "domcontentloaded" });
   }
 }
