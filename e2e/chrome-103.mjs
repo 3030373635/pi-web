@@ -198,6 +198,7 @@ try {
     await page.screenshot({ path: join(artifacts, `${target.name}-debug.png`) });
     await page.keyboard.press("Escape");
     await page.getByRole("button", { name: "Open another project…", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Open another project…", exact: true }).click();
     const directory = page.getByRole("dialog", { name: "Select directory", exact: true });
     await assertReachable(directory.getByRole("button", { name: "Close", exact: true }));
     assert.ok((await directory.locator(".directory-picker-panel").boundingBox()).height <= 500, "Directory picker fits the viewport");
@@ -234,6 +235,27 @@ try {
       document.body.append(probe);
     }, insertedMix);
     await page.waitForFunction(() => getComputedStyle(document.querySelector("#compat-inserted-probe")).backgroundColor !== "rgba(0, 0, 0, 0)");
+    const repeatedReads = await page.evaluate(async () => {
+      const prototype = CanvasRenderingContext2D.prototype;
+      const original = prototype.getImageData;
+      let reads = 0;
+      prototype.getImageData = function (...args) {
+        reads++;
+        return original.apply(this, args);
+      };
+      try {
+        const probe = document.querySelector("#compat-color-probe");
+        for (let index = 0; index < 4; index++) {
+          probe.style.marginLeft = `${index}px`;
+          await new Promise(requestAnimationFrame);
+          await new Promise(requestAnimationFrame);
+        }
+        return reads;
+      } finally {
+        prototype.getImageData = original;
+      }
+    });
+    assert.equal(repeatedReads, 0, "Unrelated style changes must not recompute cached colors on every scroll frame");
     await page.screenshot({ path: join(artifacts, `${target.name}-after.png`) });
     assert.deepEqual(errors, [], "Application must not throw browser errors");
     await context.tracing.stop({ path: join(artifacts, `${target.name}-trace.zip`) });

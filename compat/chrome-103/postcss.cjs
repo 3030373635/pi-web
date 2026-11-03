@@ -35,7 +35,7 @@ module.exports = function chrome103Postcss() {
         if (initial) defaults.append({ prop: rule.params, value: initial.value });
       });
       if (defaults.nodes.length) {
-        // Chrome 103 没有 @property；每个元素各自初始化，避免阴影/变换继承到子元素。
+        // 兼容分支显式初始化，仍保留原生 @property；放在 base 层，不能覆盖 utilities。
         const fallback = postcss.atRule({ name: "supports", params: "not (color: color-mix(in srgb, red, blue))" });
         fallback.append(defaults);
         const layer = postcss.atRule({ name: "layer", params: "base" });

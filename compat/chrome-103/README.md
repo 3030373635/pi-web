@@ -6,7 +6,7 @@
 
 - `values.cjs`：统一包装动态视口单位及混色函数，原生 CSS 保留为默认值。包装使用可还原的表达式键，避免维护一份容易遗漏的颜色清单。
 - `loader.cjs` / `next-config.ts`：在 webpack 和 Turbopack 编译组件前处理内联样式和 styled-jsx。
-- `postcss.cjs`：在 Tailwind 之后处理全局 CSS、CSS Modules、静态现代颜色和缺少 `@property` 的初始化值。
+- `postcss.cjs`：在 Tailwind 之后处理全局 CSS、CSS Modules 和静态现代颜色；兼容分支在 base 层显式初始化属性默认值，仍保留原生 `@property`。
 - `init.cjs`：在应用代码前补充缺失 API。旧浏览器使用 `vh`；混色按当前主题计算预乘 alpha 的 sRGB 颜色，主题切换、动态内联样式和后加载的样式表会更新。原生 oklab 混色在旧浏览器近似为 sRGB；`currentColor` 混色采用根文本颜色，属于视觉回退，并非完整 CSS Color 规范 polyfill。
 - `fallbacks.css`：设置表单的选中/焦点状态及 Debug 容器查询回退。
 

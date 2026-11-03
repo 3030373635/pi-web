@@ -57,6 +57,7 @@ function installChrome103Compatibility() {
   if (!missingColors && !missingHas) return;
 
   const colors = new Map();
+  const resolvedColors = new Map();
   const sheetSizes = new WeakMap();
   const pending = new Set();
   const canvas = document.createElement("canvas");
@@ -191,9 +192,13 @@ function installChrome103Compatibility() {
     if (missingColors && context) {
       const style = getComputedStyle(root);
       for (const [name, expression] of colors) {
-        const [red, green, blue, alpha] = readColor(resolveVariables(expression, style));
+        const resolved = resolveVariables(expression, style);
+        // 滚动小地图会不断更新 style；主题和表达式未变化时不能重复读取画布像素。
+        if (resolvedColors.get(name) === resolved && root.style.getPropertyValue(name)) continue;
+        const [red, green, blue, alpha] = readColor(resolved);
         const value = `rgba(${Math.round(red)}, ${Math.round(green)}, ${Math.round(blue)}, ${alpha / 255})`;
         if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+        resolvedColors.set(name, resolved);
       }
     }
     if (missingHas) {
