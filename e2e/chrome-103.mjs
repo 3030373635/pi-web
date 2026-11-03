@@ -189,6 +189,23 @@ function armCleanupDeadline() {
   }, 20_000);
   cleanupTimer.unref();
 }
+
+/**
+ * 独立限制一组浏览器动作，旧浏览器的协议或 trace 回调挂起时也能进入失败取证。
+ * @param {() => Promise<unknown>} operation 当前套件的真实浏览器验收。
+ * @param {string} label 套件、构建模式和浏览器名称。
+ * @returns {Promise<unknown>} 完整套件结果；超时只会失败，不会跳过断言。
+ */
+async function runSuiteWithDeadline(operation, label) {
+  let timer;
+  try {
+    return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
+      timer = setTimeout(() => reject(new Error(`${label} exceeded 5 minutes; ${currentPhase}`)), 300_000);
+    })]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 try {
   assert.ok(process.env.CHROME_103_PATH, "CHROME_103_PATH must point to the real Chromium 103 executable");
   const probe = createServer();
@@ -220,11 +237,13 @@ try {
   }
   const versions = [];
   for (const target of [{ name: "103", executablePath: process.env.CHROME_103_PATH }, { name: "current" }]) {
-    browser = await chromium.launch({ executablePath: target.executablePath, headless: suite !== "content", args: suite === "content" ? ["--force-renderer-accessibility"] : [] });
+    // 原生 PDF 与多标签导航使用真实桌面窗口，避免旧 headless 的目标/可见性差异介入验收。
+    const headless = !["content", "navigation"].includes(suite);
+    browser = await chromium.launch({ executablePath: target.executablePath, headless, args: suite === "content" ? ["--force-renderer-accessibility"] : [] });
     const version = browser.version();
     if (target.name === "103") assert.match(version, /^103\./, "Must use Chromium 103, not a spoofed User-Agent");
     versions.push({ browser: target.name, version });
-    const report = { browser: target.name, version, suite, mode, checks: [], limitations: [], passed: false };
+    const report = { browser: target.name, version, suite, mode, headless, checks: [], limitations: [], passed: false };
     reports.push(report);
     const seen = new Set();
     /**
@@ -275,7 +294,7 @@ try {
     await page.locator(".chat-input-textarea").waitFor();
     if (suite !== "core") {
       const checks = { settings: checkFullSiteSettings, content: checkFullSiteContent, platform: checkFullSitePlatform, navigation: checkFullSiteNavigation };
-      const result = await checks[suite](page, { browser, base, project, artifacts, sessionId, authPassword, fixtures, record });
+      const result = await runSuiteWithDeadline(() => checks[suite](page, { browser, base, project, artifacts, sessionId, authPassword, fixtures, record }), `${suite}/${mode}/${target.name}`);
       report.limitations = result?.uncovered || [];
     } else {
     await checkTranscript(page);

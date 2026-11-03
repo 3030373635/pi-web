@@ -15,7 +15,7 @@ The manifest `chrome-103-cases.json` is the reviewable case inventory; the final
 coverage job fails unless all 20 reports and all advertised case IDs pass.
 Each report includes actual action evidence and service/platform boundaries.
 The platform suite enables an isolated synthetic web password for real login
-and logout routes. Content runs headed, with native PDF screenshot pixel checks enabled by
+and logout routes. Content and navigation run headed, with native PDF screenshot pixel checks enabled by
 `CHROME_103_NATIVE_PDF=1`; media fixture coverage is PCM WAV and VP8 WebM.
 Platform checks also drive the real composer with controlled native SSE deltas,
 Send/Stop, compaction and cancellation, file selection/upload, image bytes and
