@@ -224,7 +224,8 @@ function createChatService(snapshot, state, events) {
 async function checkChatLifecycle(page, { chat, events, agentCommands, artifacts, record }) {
   const composer = page.locator(".chat-input-textarea");
   const send = page.getByRole("button", { name: "Send", exact: true });
-  const stop = page.getByRole("button", { name: "Stop agent", exact: true });
+  // ChatInput 的可访问名称来自正文 Stop；Stop agent 是 title，组件未设置同名 aria-label。
+  const stop = page.getByRole("button", { name: "Stop", exact: true }).and(page.getByTitle("Stop agent", { exact: true }));
   await composer.fill("PLATFORM_CHAT_COMPLETE");
   await reachable(send);
   await send.click();
@@ -342,7 +343,7 @@ async function checkChatAttachments(page, { chat, agentCommands, uploadRequests,
   chat.delta("PLATFORM_IMAGE_ACCEPTED");
   await page.getByText("PLATFORM_IMAGE_ACCEPTED", { exact: true }).waitFor();
   chat.finish();
-  await page.getByRole("button", { name: "Stop agent", exact: true }).waitFor({ state: "hidden" });
+  await page.getByRole("button", { name: "Stop", exact: true }).and(page.getByTitle("Stop agent", { exact: true })).waitFor({ state: "hidden" });
   await preview.waitFor({ state: "detached" });
   record("platform.chat.attach-upload-image", { service: "mocked-service", assertions: "real Attach files chooser; multipart files field + original filename/bytes; conflict=skip; success notice and @mention; decoded image preview; prompt images preserve exact PNG bytes; SSE reply settles and preview clears", uploads: uploadRequests.length });
 

@@ -123,7 +123,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await expectShows(page, a.id);
     assert.ok(await documentKept(page), "Enter must not reload the page");
     assert.equal(context.pages().length, 1);
-    console.log("PASS: plain click and Enter select a session in the same tab without a page load");
+    console.log("::notice title=Navigation step passed::plain click and Enter select a session in the same tab without a page load");
 
     // Ctrl/Cmd-click and middle-click open B in another tab; this one stays on A.
     // ControlOrMeta: on macOS Ctrl-click is a secondary click (the row menu), Cmd opens tabs.
@@ -138,7 +138,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
       assert.ok(await documentKept(page), `${label} must not reload the original tab`);
       await tab.close();
     }
-    console.log("PASS: Ctrl/Cmd+click and middle-click open the session in a new tab; the original tab keeps its session");
+    console.log("::notice title=Navigation step passed::Ctrl/Cmd+click and middle-click open the session in a new tab; the original tab keeps its session");
 
     // The built-in right-click menu offers it and opens the row it was opened on.
     await row(page, b.id).click({ button: "right" });
@@ -159,7 +159,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     tab = await newTab(() => page.keyboard.press("t"));
     await expectShows(tab, b.id);
     await expectShows(page, a.id);
-    console.log("PASS: right-click and ⋯ menus open the clicked row's session in a new tab (click and T)");
+    console.log("::notice title=Navigation step passed::right-click and ⋯ menus open the clicked row's session in a new tab (click and T)");
 
     // Each tab keeps its own session through a reload, and an explicit
     // ?session= wins over the other tab's memory. The original tab reloads
@@ -173,7 +173,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await expectShows(tab, b.id);
     await expectShows(page, a.id);
     await tab.close();
-    console.log("PASS: two tabs keep their own sessions through reloads; tab memory and ?session= are not crossed");
+    console.log("::notice title=Navigation step passed::two tabs keep their own sessions through reloads; tab memory and ?session= are not crossed");
 
     // Pinned and archived rows link the same way; pin, archive and restore never navigate.
     // (The reload above replaced the document: mark the new one.)
@@ -206,11 +206,11 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     await link(page, b.id).waitFor();
     await expectShows(page, a.id);
     assert.ok(await documentKept(page), "pin, archive and restore must not reload the page");
-    console.log("PASS: pinned and archived rows link and open in new tabs; pin, archive and restore do not navigate");
+    console.log("::notice title=Navigation step passed::pinned and archived rows link and open in new tabs; pin, archive and restore do not navigate");
 
     assert.deepEqual(forbidden, [], "opening sessions in tabs must not create, copy or prompt any");
     assert.deepEqual(await sessionIds(), initialIds, "no session was created");
-    console.log("PASS: no session created, copied or prompted while opening tabs");
+    console.log("::notice title=Navigation step passed::no session created, copied or prompted while opening tabs");
 
     // A link to a session that does not exist selects and shows no session
     // in a profile with nothing remembered. Known, pre-existing (f98c088 does
@@ -232,7 +232,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     } finally {
       await freshContext.close();
     }
-    console.log("PASS: a link to a missing session selects and shows no other session (fresh profile)");
+    console.log("::notice title=Navigation step passed::a link to a missing session selects and shows no other session (fresh profile)");
 
     // Keyboard Fork: the copy's row takes focus on its link (the row's first
     // control), not on its archive button. The copy is deleted afterwards.
@@ -247,7 +247,7 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     try {
       await page.waitForFunction((key) => document.activeElement?.matches(`[data-row-key="${key}"] a.session-tree-main`) === true, `session:group:${copyId}`);
       assert.equal(await link(page, copyId).getAttribute("href"), `?session=${copyId}`);
-      console.log("PASS: after a keyboard Fork, focus lands on the copy row's link");
+      console.log("::notice title=Navigation step passed::after a keyboard Fork, focus lands on the copy row's link");
     } finally {
       // A fresh document first: a stream the copy kept open (its grace window)
       // would ask for the deleted copy's state and log a 404, which is how any
@@ -261,6 +261,9 @@ export async function checkSessionNavigation({ browser, base, artifacts, a, b, a
     assert.deepEqual(errors, [], "browser errors while opening sessions in tabs");
     await context.tracing.stop();
   } catch (error) {
+    // 先公开原始失败，再保存较慢的 trace，避免清理等待掩盖真正卡住的步骤。
+    const details = String(error.stack || error).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+    console.error(`::error title=Session navigation failed::${details}`);
     await page.screenshot({ path: join(artifacts, "session-navigation-failure.png") }).catch(() => {});
     await context.tracing.stop({ path: join(artifacts, "session-navigation-trace.zip") }).catch(() => {});
     throw error;

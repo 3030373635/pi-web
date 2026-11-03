@@ -164,7 +164,7 @@ export async function checkProjectNavigation({ browser, base, artifacts, fixture
             assert.equal(await fileFrame.evaluate(() => window.previewInstance), fileInstance, "the file preview was not remounted");
             assert.equal(await fileFrame.locator("#notes").inputValue(), "Keep this file preview");
           }
-          console.log(`PASS: ${mobile ? "mobile" : "desktop"} project Open in new tab: ${label}, reload, source context preserved`);
+          console.log(`::notice title=Navigation step passed::${mobile ? "mobile" : "desktop"} project Open in new tab: ${label}, reload, source context preserved`);
         }
         if (mobile) {
           // A gone directory stays an explicit failed destination; it must
@@ -175,7 +175,7 @@ export async function checkProjectNavigation({ browser, base, artifacts, fixture
           assert.equal(new URL(tab.url()).searchParams.get("cwd"), empty.cwd);
           assert.equal(await selected(tab).count(), 0);
           await tab.close();
-          console.log("PASS: an unavailable project's new tab shows the validation error, not another session");
+          console.log("::notice title=Navigation step passed::an unavailable project's new tab shows the validation error, not another session");
         }
         // + still means New here, not another tab, and chooses the same worktree.
         await showSessions();
@@ -187,9 +187,12 @@ export async function checkProjectNavigation({ browser, base, artifacts, fixture
         assert.deepEqual(forbidden, [], "no session created, copied, prompted or stopped");
         assert.deepEqual((await api("/api/sessions")).sessions.map((session) => session.id).sort(), initialIds);
         assert.deepEqual(errors, []);
-        console.log(`PASS: ${mobile ? "mobile" : "desktop"} project + stays in this tab; no session mutation while opening projects`);
+        console.log(`::notice title=Navigation step passed::${mobile ? "mobile" : "desktop"} project + stays in this tab; no session mutation while opening projects`);
         await context.tracing.stop();
       } catch (error) {
+        // 在截图和 trace 清理前写出可公开读取的定位，保留原始异常。
+        const details = String(error.stack || error).replace(/%/g, "%25").replace(/\r/g, "%0D").replace(/\n/g, "%0A");
+        console.error(`::error title=Project navigation failed::${details}`);
         await page.screenshot({ path: join(artifacts, `project-navigation-${mobile ? "mobile" : "desktop"}-failure.png`) }).catch(() => {});
         await context.tracing.stop({ path: join(artifacts, "project-navigation-trace.zip") }).catch(() => {});
         throw error;

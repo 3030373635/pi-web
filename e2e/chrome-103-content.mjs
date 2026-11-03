@@ -210,7 +210,8 @@ export function prepareFullSiteContent({ project, sessionDirectory, timestamp })
     + '```svg\n<svg xmlns="http://www.w3.org/2000/svg" width="160" height="80" viewBox="0 0 160 80"><rect width="160" height="80" fill="#2763b5"/><text x="10" y="45" fill="white">Chrome103 SVG</text></svg>\n```\n\n'
     // HTTPS 链接让 Mermaid 真正执行 sanitize-url 的 URL.canParse 路径。
     + '```mermaid\ngraph TD\n A[Chrome103 Start] --> B[Compatibility Ready]\n click A href "https://example.invalid/chrome103" "Compatibility link"\n```\n\n'
-    + `![Content image](<${files.image.replace(/\\/g, "/")}>)\n\n`
+    // 图片目的地不走 Windows link 的协议重写；用相对路径让 MarkdownImage 按 cwd 解析。
+    + `![Content image](./${basename(files.image)})\n\n`
     + links + `\n\n[Open content pdf page 2](<${files.pdf.replace(/\\/g, "/")}#page=2>)`;
   const entries = [
     { type: "session", version: 3, id: CONTENT_SESSION, timestamp, cwd: project },
@@ -237,6 +238,7 @@ export function prepareFullSiteContent({ project, sessionDirectory, timestamp })
  */
 async function assertDecodedImage(image) {
   await image.waitFor({ state: "visible" });
+  await image.scrollIntoViewIfNeeded();
   await image.evaluate(async (element) => {
     await element.decode();
     if (!element.complete || element.naturalWidth <= 0 || element.naturalHeight <= 0) throw new Error("Image did not decode");
@@ -589,6 +591,7 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     panel = await openContentFile(page, "tsv");
     await panel.getByRole("table").waitFor();
     assert.equal(await panel.getByRole("columnheader", { name: "Status", exact: true }).count(), 1);
+    await panel.getByRole("cell", { name: "Pending", exact: true }).waitFor();
     assert.equal(await panel.getByRole("cell", { name: "Pending", exact: true }).count(), 1);
     record("files.tsv", "real-file-api: TSV preview has Status header and Pending data cell");
 
@@ -599,6 +602,8 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     assert.equal(await panel.getByRole("cell", { name: "Ready", exact: true }).count(), 1);
     record("files.markdown", "real-file-api: file Preview renders heading, strong text and table cell");
 
+    // 成熟 helper 从文件树首次打开 HTML；预先打开会让其全局 title 匹配到标签栏和正文。
+    await checkFilePanel(page, fixtures.files.html);
     panel = await openContentFile(page, "html");
     const previewButton = panel.getByRole("button", { name: "Preview", exact: true });
     if (await previewButton.getAttribute("aria-pressed") !== "true") await previewButton.click();
@@ -607,9 +612,6 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     await frame.locator("#filter").selectOption({ label: "Pending" });
     assert.equal(await frame.locator("#notes").inputValue(), "Chrome103 preview note");
     assert.equal(await frame.locator("#filter").inputValue(), "Pending");
-    // 复用成熟测试验证分屏/全屏往返时 iframe 实例、滚动及表单值不丢失。
-    await checkFilePanel(page, fixtures.files.html);
-    await page.getByRole("button", { name: "Show file panel", exact: true }).click();
     await panel.getByRole("button", { name: "Source", exact: true }).click();
     await panel.locator(".file-source-line").first().waitFor();
     assert.match(await panel.innerText(), /HTML preview state must survive layout changes/);
@@ -647,7 +649,8 @@ export async function checkFullSiteContent(page, { base, project, artifacts, ses
     await panel.getByText("Binary file: no preview. Download it to open it.", { exact: true }).waitFor();
     assert.equal(await panel.locator(".file-source-line").count(), 0);
     const downloadEvent = page.waitForEvent("download");
-    await panel.getByRole("link", { name: "Download", exact: true }).click();
+    // files.download 的真实英文是 Download file；此处选正文下载入口以区别工具栏同名链接。
+    await panel.locator("a.file-viewer-mode-button[download]").click();
     const download = await downloadEvent;
     assert.equal(download.suggestedFilename(), basename(fixtures.files.binary));
     const downloadPath = join(artifacts, `${browserMajor}-fullsite-binary-download.bin`);
