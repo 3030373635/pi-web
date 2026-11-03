@@ -2,6 +2,7 @@ import type { NextConfig } from "next";
 import { readFileSync } from "fs";
 import { dirname, join } from "path";
 import { fileURLToPath } from "url";
+import { withChrome103Compatibility } from "./compat/chrome-103/next-config";
 
 const configDir = dirname(fileURLToPath(import.meta.url));
 const { version } = JSON.parse(readFileSync(join(configDir, "package.json"), "utf8")) as { version: string };
@@ -107,4 +108,4 @@ const nextConfig: NextConfig = {
   },
 };
 
-export default nextConfig;
+export default withChrome103Compatibility(nextConfig, configDir);

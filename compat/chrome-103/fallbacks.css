@@ -1,0 +1,38 @@
+/* 仅缺少相关能力时启用，避免覆盖现代浏览器的原生实现。 */
+@supports not selector(:has(*)) {
+  .settings-theme-option:hover {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--border);
+  }
+  .settings-theme-option[data-pi-compat-checked] {
+    box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--accent);
+  }
+  .settings-send-mode-option[data-pi-compat-checked] {
+    background: var(--bg-selected);
+    color: var(--accent);
+    font-weight: 600;
+  }
+  .settings-send-mode-option:not([data-pi-compat-checked]):hover {
+    background: var(--bg-hover);
+  }
+  .settings-theme-option[data-pi-compat-focus],
+  .settings-send-mode-option[data-pi-compat-focus] {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+@supports not (container-type: inline-size) {
+  /* 旧浏览器无法根据面板宽度换列，使用可收缩单列保证所有诊断项可达。 */
+  .debug-panel .debug-cols {
+    grid-template-areas: "page" "server" "sessions";
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: none;
+  }
+  .debug-panel .debug-col-server,
+  .debug-panel .debug-col-sessions {
+    margin-left: 0;
+    padding: 10px 0 0;
+    border-left: 0;
+    border-top: 1px solid var(--border);
+  }
+}

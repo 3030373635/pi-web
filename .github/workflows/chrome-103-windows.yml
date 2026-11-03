@@ -1,0 +1,80 @@
+name: Chrome 103 Windows compatibility
+
+on:
+  workflow_dispatch:
+  push:
+    branches: ["codex/chrome-103-compat"]
+  pull_request:
+    paths:
+      - "compat/**"
+      - "app/**"
+      - "components/**"
+      - "hooks/**"
+      - "lib/**"
+      - "e2e/**"
+      - "next.config.ts"
+      - "postcss.config.mjs"
+      - "package*.json"
+      - ".github/workflows/chrome-103-windows.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: chrome-103-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compatibility:
+    # GitHub 没有 Windows 10 托管机；在 Server 2022 上运行真实 103 内核。
+    runs-on: windows-2022
+    timeout-minutes: 35
+    env:
+      NEXT_TELEMETRY_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22.19.0
+          cache: npm
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint and typecheck
+        shell: pwsh
+        run: |
+          npm run lint
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npx tsc --noEmit
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Test compatibility transforms, APIs and Windows packaging
+        run: node --test lib/chrome-103-compat.test.mjs lib/offline-windows-package.test.mjs
+      - name: Install actual Chromium 103 and current Chromium
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          # 官方快照 1002885 对应 103.0.5060.0；固定对象代次和官方 MD5 防止下载错误版本。
+          $archive = Join-Path $env:RUNNER_TEMP "chromium-103.zip"
+          $directory = Join-Path $env:RUNNER_TEMP "chromium-103"
+          Invoke-WebRequest "https://storage.googleapis.com/chromium-browser-snapshots/Win_x64/1002885/chrome-win.zip?generation=1652399340549393" -OutFile $archive
+          $actualHash = (Get-FileHash $archive -Algorithm MD5).Hash.ToLowerInvariant()
+          if ($actualHash -ne "5a1265254d46356f9f0d146bd5386b32") { throw "Chromium 103 archive checksum mismatch" }
+          Expand-Archive $archive -DestinationPath $directory
+          "CHROME_103_PATH=$directory\chrome-win\chrome.exe" | Out-File $env:GITHUB_ENV -Append -Encoding utf8
+          npx playwright install chromium
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Build production application
+        run: npm run build
+      - name: Check old and current browsers against production application
+        run: node e2e/chrome-103.mjs
+      - name: Check Turbopack with old and current browsers
+        run: node e2e/chrome-103.mjs
+        env:
+          E2E_SERVER_MODE: dev
+      - name: Upload logs, screenshots and browser versions
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: chrome-103-windows-results
+          path: test-results/chrome-103/
+          if-no-files-found: ignore
+          retention-days: 14

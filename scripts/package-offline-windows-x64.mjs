@@ -3,7 +3,7 @@
 import { cp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-const APP_PATHS = [".next", "bin", "node_modules", "public", "package.json", "next.config.ts"];
+const APP_PATHS = [".next", "bin", "compat", "node_modules", "public", "package.json", "next.config.ts"];
 
 /**
  * 解析 Windows 离线包脚本的命名参数。

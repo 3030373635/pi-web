@@ -38,7 +38,7 @@ if [[ "${platform}" == "linux" && ! -x "${python_runtime_root}/bin/python3" ]]; 
   exit 1
 fi
 
-for required_path in .next .playwright-browsers bin node_modules public scripts/playwright-cli-wrapper.sh package.json next.config.ts LICENSE; do
+for required_path in .next .playwright-browsers bin compat node_modules public scripts/playwright-cli-wrapper.sh package.json next.config.ts LICENSE; do
   if [[ ! -e "${package_root}/${required_path}" ]]; then
     echo "缺少打包所需文件: ${package_root}/${required_path}" >&2
     exit 1
@@ -70,6 +70,7 @@ cp -a "${package_root}/.next" "${app_root}/.next"
 # Next.js 构建缓存只用于增量构建，目标机器运行时不需要，禁止写入离线包。
 rm -rf "${app_root}/.next/cache"
 cp -a "${package_root}/bin" "${app_root}/bin"
+cp -a "${package_root}/compat" "${app_root}/compat"
 cp -a "${package_root}/node_modules" "${app_root}/node_modules"
 cp -a "${package_root}/public" "${app_root}/public"
 # Chromium 必须位于产物内部，目标机器首次执行 playwright-cli 时不能依赖网络下载。

@@ -1,5 +1,14 @@
 # CI and browser regression tests
 
+The Windows-only **Chrome 103 Windows compatibility** workflow additionally runs
+`node e2e/chrome-103.mjs` against a production build. It requires
+`CHROME_103_PATH` pointing to real Chromium 103 and also launches current Chromium.
+The suite checks the original unbounded-height failure, wheel scrolling, the
+composer, window resizing, sidebar layouts, file viewing, all six settings
+sections, themes, short-window settings scrolling, draft retention and reload.
+Artifacts are saved in `test-results/chrome-103/`. See
+`compat/chrome-103/README.md` for limitations and upstream upgrade instructions.
+
 Adapted from @Nuctori's CI/E2E proposal in #617 and #599. The performance
 scanner, reverse reader, sidebar changes, and timing benchmarks are not included.
 

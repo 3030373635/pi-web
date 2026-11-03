@@ -2,11 +2,13 @@ import type { Metadata, Viewport } from "next";
 import { Noto_Sans_Mono } from "next/font/google";
 import { PwaRegistration } from "@/components/PwaRegistration";
 import { THEME_INIT_SCRIPT } from "@/lib/theme";
+import { CHROME_103_INIT_SCRIPT } from "@/compat/chrome-103/init.cjs";
 import "katex/dist/katex.min.css";
 import "./globals.css";
 import "./settings.css";
 import "./sidebar.css";
 import "./sidebar-menu.css";
+import "@/compat/chrome-103/fallbacks.css";
 
 const notoSansMono = Noto_Sans_Mono({
   subsets: ["latin", "cyrillic"],
@@ -67,7 +69,7 @@ export default function RootLayout({
         <meta name="google" content="notranslate" />
         <script
           dangerouslySetInnerHTML={{
-            __html: THEME_INIT_SCRIPT,
+            __html: THEME_INIT_SCRIPT + CHROME_103_INIT_SCRIPT,
           }}
         />
       </head>

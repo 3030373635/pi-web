@@ -1,5 +1,10 @@
 # Mobile and browser behavior
 
+## Intranet Chrome 103 (`compat/chrome-103/`)
+- Keep compatibility code in its own directory and retain the three entry points in the layout, Next config and PostCSS config. Both bundlers must run the same component loader: changing only global CSS misses inline `100dvh` in AppShell, DirectoryPicker and top panels.
+- Dynamic viewport and mixed-color values retain native fallbacks. Only browsers missing a capability receive compatibility variables. The startup script runs before app modules, including `findLast`/`findLastIndex` fallbacks used by message/tool rendering. Old mixed colors use premultiplied sRGB; oklab and root `currentColor` are visual approximations, documented in the directory README.
+- Include `compat` in npm and offline packages: `next.config.ts` imports its configuration helper at startup. The Windows-only `chrome-103-windows.yml` runs real Chromium 103 and current Chromium against a production build, with screenshots/traces. Its Server 2022 runner does not certify the exact Windows 10 1909 machine.
+
 ## Mobile software keyboard (`hooks/useViewportHeight.ts`)
 - While an editor has focus and the visual viewport is more than `KEYBOARD_MIN_HEIGHT_PX` (60px) shorter than `innerHeight / scale`, the hook writes `visualViewport.height` to `--app-viewport-height`; smaller shrinks are Safari toolbars. Always compare against that zoom-corrected height, or iOS auto-zoom and pinch zoom leave the composer behind the keyboard.
 - WebKit settles the shrunken height only after the keyboard animation, often without another `resize` (bugs.webkit.org 265578), and an IME candidate bar resizes the keyboard with no viewport event at all. So every trigger, composition/input/keyup events on a focused editor included, starts one non-restarting chain of re-reads (`SETTLE_DELAYS_MS`). Reading once per event keeps the full-screen height, and `scrollTo(0, 0)` then fights the page scrolling to the caret: a jittering composer.
