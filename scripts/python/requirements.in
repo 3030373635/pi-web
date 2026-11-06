@@ -2,6 +2,7 @@
 python-pptx
 openpyxl
 xlsxwriter
+xlrd
 python-docx
 docxtpl
 pypdf
@@ -17,7 +18,8 @@ pandas
 # 防止 Office Open XML 解析遭受实体扩展攻击。
 defusedxml
 
-# HTML 解析。
+# HTTP 请求和 HTML 解析。
+requests
 beautifulsoup4
 
 # Windows 上的 pandas 需要 tzdata，两端均安装以保持包清单一致。
