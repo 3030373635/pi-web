@@ -172,10 +172,11 @@ runs:
         }
 
         $env:PATH = "$bundleRoot\runtime;$bundleRoot\runtime\python;$bundleRoot\app\node_modules\.bin;$env:PATH"
-        # 从已解压的交付包验证 PATH，避免使用 runner 预装的 Python。
-        $python = Get-Command python.exe -CommandType Application
-        if ($python.Source -ne "$bundleRoot\runtime\python\python.exe") {
-          throw "PATH did not resolve to packaged Python."
+        # runner 也可能有 Python，仅读取 PATH 优先匹配的解释器。
+        $python = Get-Command python.exe -CommandType Application -TotalCount 1
+        $packagedPythonPath = "$bundleRoot\runtime\python\python.exe"
+        if ($python.Source -ne $packagedPythonPath) {
+          throw "Expected packaged Python at '$packagedPythonPath', but PATH resolved '$($python.Source)'."
         }
         & $python.Source -I -B -c "import platform, sys; assert sys.platform == 'win32' and sys.maxsize > 2**32; assert platform.python_version() == sys.argv[1]" $env:PI_WEB_PYTHON_VERSION
         if ($LASTEXITCODE -ne 0) {
