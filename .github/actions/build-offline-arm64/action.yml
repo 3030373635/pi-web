@@ -132,12 +132,6 @@ runs:
           "node-v${{ inputs.node-version }}-${{ inputs.node-platform }}-arm64.tar.xz" \
           dist
 
-        # 校验文件使用产物内的相对文件名，下载并解压 Actions Artifact 后可直接执行校验。
-        (
-          cd dist
-          shasum -a 256 "${artifact_name}.tar.gz" > SHA256SUMS
-          shasum -a 256 --check SHA256SUMS
-        )
         echo "artifact_name=${artifact_name}" >> "${GITHUB_OUTPUT}"
 
     - name: Smoke test packaged application
@@ -205,12 +199,10 @@ runs:
         exit 1
 
     - name: Upload offline package
-      uses: actions/upload-artifact@v6
+      # 直接上传 tar.gz，保留包内文件权限和软链接，避免再套一层 ZIP。
+      uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.package.outputs.artifact_name }}
-        path: |
-          dist/${{ steps.package.outputs.artifact_name }}.tar.gz
-          dist/SHA256SUMS
+        path: dist/${{ steps.package.outputs.artifact_name }}.tar.gz
+        archive: false
         if-no-files-found: error
-        compression-level: 0
         retention-days: 30

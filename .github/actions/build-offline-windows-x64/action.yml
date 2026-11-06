@@ -144,15 +144,6 @@ runs:
 
         $archivePath = Join-Path "dist" "$artifactName.zip"
         Compress-Archive -Path (Join-Path "dist" $artifactName) -DestinationPath $archivePath -CompressionLevel Optimal
-        $archiveHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-        "$archiveHash  $artifactName.zip" | Set-Content -Path "dist\SHA256SUMS" -Encoding ascii
-
-        # 从最终校验文件重新读取并核对，防止上传不可直接使用的哈希记录。
-        $checksumRecord = (Get-Content "dist\SHA256SUMS").Trim() -split "\s+", 2
-        $verifiedHash = (Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash.ToLowerInvariant()
-        if ($checksumRecord.Count -ne 2 -or $checksumRecord[0] -ne $verifiedHash -or $checksumRecord[1] -ne "$artifactName.zip") {
-          throw "The generated SHA256SUMS record is invalid."
-        }
 
         # 写入步骤输出，后续冒烟测试和上传必须使用同一个产物名。
         "artifact_name=$artifactName" | Out-File -FilePath $env:GITHUB_OUTPUT -Encoding utf8 -Append
@@ -286,12 +277,10 @@ runs:
         }
 
     - name: Upload offline package
-      uses: actions/upload-artifact@v6
+      # 直接上传已生成的 ZIP，下载后解压一次即可。
+      uses: actions/upload-artifact@v7
       with:
-        name: ${{ steps.package.outputs.artifact_name }}
-        path: |
-          dist/${{ steps.package.outputs.artifact_name }}.zip
-          dist/SHA256SUMS
+        path: dist/${{ steps.package.outputs.artifact_name }}.zip
+        archive: false
         if-no-files-found: error
-        compression-level: 0
         retention-days: 30
