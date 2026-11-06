@@ -72,7 +72,8 @@ async function writeLaunchers(bundleRoot) {
     "rem 始终从离线包根目录启动，解压路径改变后相对文件仍然有效。",
     'set "BUNDLE_ROOT=%~dp0"',
     'cd /d "%BUNDLE_ROOT%"',
-    'set "PATH=%BUNDLE_ROOT%runtime;%BUNDLE_ROOT%app\\node_modules\\.bin;%PATH%"',
+    "rem Agent 和终端优先使用离线包内的 Node.js 和 Python。",
+    'set "PATH=%BUNDLE_ROOT%runtime;%BUNDLE_ROOT%runtime\\python;%BUNDLE_ROOT%app\\node_modules\\.bin;%PATH%"',
     'set "PLAYWRIGHT_BROWSERS_PATH=%BUNDLE_ROOT%browsers"',
     'set "NO_UPDATE_NOTIFIER=1"',
     '"%BUNDLE_ROOT%runtime\\node.exe" "%BUNDLE_ROOT%app\\bin\\pi-web.js" --no-open %*',
@@ -107,6 +108,8 @@ async function stageWindowsPackage({ packageRoot, runtimeRoot, outputRoot }) {
     await requirePath(path.join(packageRoot, relativePath), "打包文件");
   }
   await requirePath(path.join(runtimeRoot, "node.exe"), "Windows x64 Node.js 运行时");
+  const pythonRoot = path.join(packageRoot, ".python-runtime");
+  await requirePath(path.join(pythonRoot, "python.exe"), "Windows x64 Python 运行时");
 
   const packageJson = JSON.parse(await readFile(path.join(packageRoot, "package.json"), "utf8"));
   if (typeof packageJson.version !== "string" || packageJson.version.length === 0) {
@@ -129,9 +132,10 @@ async function stageWindowsPackage({ packageRoot, runtimeRoot, outputRoot }) {
     }
   }
 
-  // Chromium 和 Node.js 都随包分发，目标 Windows 10 机器首次启动不依赖网络。
+  // 保留运行时目录结构，使解释器能在解压后找到自己的 DLL、标准库和依赖。
   await cp(path.join(packageRoot, ".playwright-browsers"), path.join(bundleRoot, "browsers"), { recursive: true });
   await cp(runtimeRoot, path.join(bundleRoot, "runtime"), { recursive: true });
+  await cp(pythonRoot, path.join(bundleRoot, "runtime", "python"), { recursive: true });
   await cp(path.join(packageRoot, "LICENSE"), path.join(bundleRoot, "LICENSE"));
   await writeLaunchers(bundleRoot);
   return bundleRoot;

@@ -6,6 +6,18 @@ inputs:
     description: Node.js version bundled into the Windows offline package.
     required: false
     default: 22.19.0
+  python-version:
+    description: CPython version bundled into the Windows offline package.
+    required: false
+    default: 3.12.14
+  python-build-tag:
+    description: python-build-standalone release tag used for Windows x64.
+    required: false
+    default: "20260825"
+  python-sha256:
+    description: SHA256 for the pinned Windows x64 Python archive.
+    required: false
+    default: 8e6aad12ef6fc9685e67ce66253f8f72d6e8fa02cb7187e5850bd4db5ecd9e2a
 
 runs:
   using: composite
@@ -84,6 +96,36 @@ runs:
 
         Expand-Archive -LiteralPath $archiveName -DestinationPath ".node-runtime"
 
+    - name: Install portable Python runtime
+      shell: pwsh
+      env:
+        PI_WEB_PYTHON_VERSION: ${{ inputs.python-version }}
+        PI_WEB_PYTHON_BUILD_TAG: ${{ inputs.python-build-tag }}
+        PI_WEB_PYTHON_SHA256: ${{ inputs.python-sha256 }}
+      run: |
+        $ErrorActionPreference = "Stop"
+        $buildTag = $env:PI_WEB_PYTHON_BUILD_TAG
+        $archiveName = "cpython-$($env:PI_WEB_PYTHON_VERSION)+${buildTag}-x86_64-pc-windows-msvc-install_only_stripped.tar.gz"
+        $archivePath = Join-Path $env:RUNNER_TEMP $archiveName
+        $runtimeRoot = Join-Path $env:GITHUB_WORKSPACE ".python-runtime"
+        $requirementsPath = Join-Path $env:GITHUB_WORKSPACE "scripts/python/requirements.lock"
+        $releaseUrl = "https://github.com/astral-sh/python-build-standalone/releases/download/$buildTag"
+        Invoke-WebRequest -Uri "$releaseUrl/$archiveName" -OutFile $archivePath
+        if ((Get-FileHash -Algorithm SHA256 -LiteralPath $archivePath).Hash -ne $env:PI_WEB_PYTHON_SHA256) {
+          throw "Python archive checksum mismatch."
+        }
+
+        # 去掉归档的外层 python 目录，再用随包解释器安装锁定的 wheel。
+        New-Item -ItemType Directory -Path $runtimeRoot | Out-Null
+        & tar.exe -xzf $archivePath -C $runtimeRoot --strip-components 1
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to extract the Python runtime."
+        }
+        & "$runtimeRoot\python.exe" -I -m pip --isolated install --require-hashes --only-binary=:all: --no-compile --no-cache-dir --requirement $requirementsPath
+        if ($LASTEXITCODE -ne 0) {
+          throw "Failed to install bundled Python packages."
+        }
+
     - name: Assemble offline package
       id: package
       shell: pwsh
@@ -117,6 +159,8 @@ runs:
 
     - name: Smoke test packaged application
       shell: pwsh
+      env:
+        PI_WEB_PYTHON_VERSION: ${{ inputs.python-version }}
       run: |
         $ErrorActionPreference = "Stop"
         $artifactName = "${{ steps.package.outputs.artifact_name }}"
@@ -136,7 +180,23 @@ runs:
           throw "Packaged Node.js is not for Windows."
         }
 
-        $env:PATH = "$bundleRoot\runtime;$bundleRoot\app\node_modules\.bin;$env:PATH"
+        $env:PATH = "$bundleRoot\runtime;$bundleRoot\runtime\python;$bundleRoot\app\node_modules\.bin;$env:PATH"
+        # 从已解压的交付包验证 PATH，避免使用 runner 预装的 Python。
+        $python = Get-Command python.exe -CommandType Application
+        if ($python.Source -ne "$bundleRoot\runtime\python\python.exe") {
+          throw "PATH did not resolve to packaged Python."
+        }
+        & $python.Source -I -B -c "import platform, sys; assert sys.platform == 'win32' and sys.maxsize > 2**32; assert platform.python_version() == sys.argv[1]" $env:PI_WEB_PYTHON_VERSION
+        if ($LASTEXITCODE -ne 0) {
+          throw "Packaged Python has an unexpected version or platform."
+        }
+
+        # 与 Linux 使用同一份锁和冒烟脚本，覆盖原生扩展及文档处理。
+        & $python.Source -I -B "scripts/python-runtime-smoke.py" (Join-Path $smokeRoot "python-smoke") "scripts/python/requirements.lock"
+        if ($LASTEXITCODE -ne 0) {
+          throw "Packaged Python failed the shared runtime smoke test."
+        }
+
         $env:PLAYWRIGHT_BROWSERS_PATH = "$bundleRoot\browsers"
         if (-not (Get-Command playwright-cli.cmd -ErrorAction SilentlyContinue)) {
           throw "The packaged Playwright wrapper is missing from PATH."

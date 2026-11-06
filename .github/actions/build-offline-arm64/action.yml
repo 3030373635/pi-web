@@ -117,7 +117,7 @@ runs:
         ./scripts/install-python-runtime.sh \
           "${python_archive}" \
           "${metadata_archive}" \
-          scripts/python/requirements-linux-arm64.lock \
+          scripts/python/requirements.lock \
           .python-runtime
 
     - name: Assemble offline package
@@ -165,12 +165,11 @@ runs:
           test -f "${bundle_root}/runtime/python/licenses/python-packages.json"
           # 扫描最终产物内所有 ELF 和原生扩展，禁止任何 GLIBC 符号超过麒麟目标机的 2.31。
           ./scripts/audit-python-glibc.sh "${bundle_root}/runtime/python" 2.31
-          "${bundle_root}/runtime/bin/python" -c \
-            'import json, sys; data=json.load(open(sys.argv[1], encoding="utf-8")); names={item["metadata"]["name"].lower() for item in data["installed"]}; expected={"python-pptx", "openpyxl", "xlsxwriter", "python-docx", "docxtpl", "pypdf", "pdfplumber", "reportlab", "pypdfium2", "pillow", "numpy", "pandas", "defusedxml"}; assert expected <= names' \
-            "${bundle_root}/runtime/python/licenses/python-packages.json"
-          "${bundle_root}/runtime/bin/python" \
+          # 按共享锁逐项检查解压后的 Python 包名和版本，再运行文档处理用例。
+          "${bundle_root}/runtime/bin/python" -I -B \
             scripts/python-runtime-smoke.py \
-            "${smoke_root}/python-smoke"
+            "${smoke_root}/python-smoke" \
+            scripts/python/requirements.lock
         else
           test ! -e "${bundle_root}/runtime/python"
           test ! -e "${bundle_root}/runtime/bin/python"

@@ -16,3 +16,12 @@ pandas
 
 # 防止 Office Open XML 解析遭受实体扩展攻击。
 defusedxml
+
+# HTML 解析。
+beautifulsoup4
+
+# Windows 上的 pandas 需要 tzdata，两端均安装以保持包清单一致。
+tzdata
+
+# 与两端的便携 CPython 归档中的 pip 版本一致。
+pip==26.2.1

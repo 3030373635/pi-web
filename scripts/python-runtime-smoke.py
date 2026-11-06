@@ -1,8 +1,11 @@
-"""Smoke test for the Python document runtime shipped in Linux ARM64 bundles."""
+"""Smoke test for the Python runtime shipped in Linux and Windows bundles."""
 
+from importlib.metadata import distributions
 from pathlib import Path
+import re
 import sys
 
+from bs4 import BeautifulSoup
 import defusedxml.ElementTree
 from docx import Document
 from docxtpl import DocxTemplate
@@ -18,14 +21,39 @@ from reportlab.pdfgen import canvas
 import xlsxwriter
 
 
+def verify_package_versions(requirements_path: Path) -> None:
+    """Require the bundled distributions to match the shared lock exactly.
+
+    Args:
+        requirements_path: Shared hash-locked requirements file used by both builds.
+    """
+    expected = dict(re.findall(
+        r"^([a-z0-9-]+)==(\S+)",
+        requirements_path.read_text(encoding="utf-8"),
+        re.MULTILINE,
+    ))
+    # Wheel metadata can spell the same distribution with underscores or dots.
+    installed = {
+        re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower(): dist.version
+        for dist in distributions()
+    }
+    if installed != expected:
+        missing = sorted(expected.items() - installed.items())
+        unexpected = sorted(installed.items() - expected.items())
+        raise SystemExit(f"Bundled Python packages differ from the lock: {missing=}, {unexpected=}")
+
+
 def verify_data_packages() -> None:
-    """Verify that NumPy, pandas, Pillow, and defusedxml execute real operations."""
+    """Verify that the bundled data, image, HTML, and XML packages work."""
     values = np.array([1, 2, 3], dtype=np.int64)
     frame = pd.DataFrame({"value": values})
     assert int(frame["value"].sum()) == 6
 
     image = Image.new("RGB", (4, 3), color="white")
     assert image.size == (4, 3)
+
+    html = BeautifulSoup('<p class="name">Pi Web</p>', "html.parser")
+    assert html.select_one("p.name").get_text() == "Pi Web"
 
     xml_root = defusedxml.ElementTree.fromstring("<root><value>safe</value></root>")
     assert xml_root.findtext("value") == "safe"
@@ -102,18 +130,20 @@ def verify_pdf_file(output_root: Path) -> None:
     with pdfplumber.open(pdf_path) as document:
         assert "Pi Web PDF" in (document.pages[0].extract_text() or "")
 
-    # Rendering exercises the bundled native PDFium ARM64 library, not only Python imports.
+    # Rendering exercises the bundled native PDFium library.
     pdf_document = pdfium.PdfDocument(pdf_path)
     rendered_image = pdf_document[0].render(scale=1).to_pil()
     assert rendered_image.width > 0 and rendered_image.height > 0
 
 
-def main(output_directory: str) -> None:
+def main(output_directory: str, requirements_path: str) -> None:
     """Run all document-runtime smoke checks.
 
     Args:
         output_directory: Directory used for generated verification artifacts.
+        requirements_path: Shared requirements lock to check against installed packages.
     """
+    verify_package_versions(Path(requirements_path))
     output_root = Path(output_directory).resolve()
     output_root.mkdir(parents=True, exist_ok=True)
     verify_data_packages()
@@ -124,6 +154,6 @@ def main(output_directory: str) -> None:
 
 
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        raise SystemExit("Usage: python-runtime-smoke.py <output-directory>")
-    main(sys.argv[1])
+    if len(sys.argv) != 3:
+        raise SystemExit("Usage: python-runtime-smoke.py <output-directory> <requirements.lock>")
+    main(sys.argv[1], sys.argv[2])
